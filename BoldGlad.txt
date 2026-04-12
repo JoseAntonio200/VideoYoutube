@@ -421,7 +421,7 @@ begin
   if (not bOpera) or bLock then
   begin
     CancelPendingOrders;
-
+    bPosicaoFoiAberta := False;
 
     if HasPosition then
       ClosePosition;
@@ -520,6 +520,7 @@ begin
     if bPosicaoFoiAberta then
     begin
       bPosicaoFoiAberta     := False;
+      bSkip                 := True;
       ConsoleLog("BG10: POSICAO_ZERADA_POR_COBERTURA_DETECTADA_CORRETAMENTE");
     end;
 
@@ -635,41 +636,12 @@ begin
 
   { ============================================================ }
   { 8. SINCRONIZACAO APOS ZERAGEM POR ORDEM DE COBERTURA         }
-  { CORRECAO PONTO 1: agora executada apos secao 16              }
-  { e usa bPosicaoFoiAberta para detectar o evento corretamente  }
+  { CORRECAO PONTO 4: bSkip movido para dentro da secao 16,      }
+  { no bloco que detecta bPosicaoFoiAberta. A condicao original  }
+  { desta secao era True em todos os ticks sem posicao,          }
+  { impedindo qualquer entrada normal apos a primeira operacao.  }
+  { Limpeza de estado ja coberta integralmente pela secao 16.    }
   { ============================================================ }
-  if (not HasPosition) and (not bPosicaoFoiAberta) and (vEntrada = 0) then
-  begin
-    bSkip                 := True;
-
-
-    bTrailingCandleArmado := False;
-    bProtecaoBEArmada     := False;
-    vNivelProtecaoBE      := 0;
-
-
-    vStopAtual            := 0;
-    vAlvoAtual            := 0;
-    vStopCandidato        := 0;
-
-
-    bAlvoAtivado          := False;
-    vLucroAtual           := 0;
-    vMaxLucroAberto       := 0;
-    vNivelSaidaLucro      := 0;
-
-
-    bArmCompra            := False;
-    bArmVenda             := False;
-    nBarraSinalCompra     := 0;
-    nBarraSinalVenda      := 0;
-    vBaseCompra           := 0;
-    vBaseVenda            := 0;
-    vPrecoC               := 0;
-    vPrecoV               := 0;
-    vPrecoRevC            := 0;
-    vPrecoRevV            := 0;
-  end;
 
 
   { ============================================================ }
@@ -1087,7 +1059,6 @@ begin
       begin
         if bArmVenda then
         begin
-          CancelPendingOrders;
           bArmVenda         := False;
           nBarraSinalVenda  := 0;
           vBaseVenda        := 0;
@@ -1101,7 +1072,6 @@ begin
         vPrecoC     := vPrecoRevC;
 
 
-        CancelPendingOrders;
         bArmCompra        := True;
         nBarraSinalCompra := CurrentBar;
         ConsoleLog("BG10: GATILHO_DE_COMPRA_ARMADO");
@@ -1116,7 +1086,6 @@ begin
       begin
         if bArmCompra then
         begin
-          CancelPendingOrders;
           bArmCompra        := False;
           nBarraSinalCompra := 0;
           vBaseCompra       := 0;
@@ -1130,7 +1099,6 @@ begin
         vPrecoV    := vPrecoRevV;
 
 
-        CancelPendingOrders;
         bArmVenda         := True;
         nBarraSinalVenda  := CurrentBar;
         ConsoleLog("BG10: GATILHO_DE_VENDA_ARMADO");
@@ -1286,6 +1254,7 @@ begin
     if (nBarraEntrada > 0) and (CurrentBar = nBarraEntrada) and IsBought and (High >= (vEntrada + pAlvoCandleEntradaPts)) then
     begin
       CancelPendingOrders;
+      bPosicaoFoiAberta := False;
       ClosePosition;
       bSkip := True;
 
@@ -1311,6 +1280,7 @@ begin
     else if (nBarraEntrada > 0) and (CurrentBar = nBarraEntrada) and IsSold and (Low <= (vEntrada - pAlvoCandleEntradaPts)) then
     begin
       CancelPendingOrders;
+      bPosicaoFoiAberta := False;
       ClosePosition;
       bSkip := True;
 
@@ -1336,6 +1306,7 @@ begin
     else if (nBarraEntrada > 0) and (CurrentBar = (nBarraEntrada + 1)) and IsBought and (Low < vMinCandleEntrada) then
     begin
       CancelPendingOrders;
+      bPosicaoFoiAberta := False;
       ClosePosition;
       bSkip := True;
 
@@ -1361,6 +1332,7 @@ begin
     else if (nBarraEntrada > 0) and (CurrentBar = (nBarraEntrada + 1)) and IsSold and (High > vMaxCandleEntrada) then
     begin
       CancelPendingOrders;
+      bPosicaoFoiAberta := False;
       ClosePosition;
       bSkip := True;
 
@@ -1528,6 +1500,7 @@ begin
     if bAlvoAtivado and (vLucroAtual <= vNivelSaidaLucro) then
     begin
       CancelPendingOrders;
+      bPosicaoFoiAberta := False;
       ClosePosition;
       bSkip := True;
       bTrailingCandleArmado := False;
