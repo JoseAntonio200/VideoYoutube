@@ -360,7 +360,41 @@ Como o EA foi pensado com comportamento intrabar, ele tende a ficar mais fiel no
 
 Há parâmetros antigos mantidos, mas a lógica atual relevante está centrada em stop fixo, breakeven por steps, trailing por candle e retração do lucro. Isso é bom para compatibilidade, mas pode gerar leitura confusa se alguém achar que todos os parâmetros afetam de fato a lógica corrente.
 
-## **22\. Conclusão técnica**
+## **22\. Histórico de correções aplicadas**
+
+Esta seção documenta todos os bugs identificados e corrigidos no código gerado originalmente pelo ChatGPT.
+
+### **CORREÇÃO PONTO 1 — Detecção de zeragem por cobertura (seção 16 e seção 8)**
+
+**Bug:** A seção 16 limpava `vEntrada` antes que a seção 8 pudesse distinguir se a zeragem foi causada por uma ordem de cobertura (`SellToCoverStop`/`BuyToCoverStop`) ou por outro motivo.  
+**Correção:** Introduzida a variável `bPosicaoFoiAberta`. É setada para `True` quando a posição é registrada (seção 16) e detectada para `False` quando a seção 16 encontra `not HasPosition` e `bPosicaoFoiAberta = True`.
+
+### **CORREÇÃO PONTO 2 — Armamento de gatilho bloqueado se preço ainda dentro da faixa (seção 13)**
+
+**Bug:** O armamento de gatilhos de compra e venda não verificava `bPrecoForaFaixaOperavel`, permitindo armar gatilhos mesmo com o preço dentro da zona de consolidação.  
+**Correção:** Adicionada verificação `bPrecoForaFaixaOperavel` nas condições de armamento de ambos os gatilhos.
+
+### **CORREÇÃO PONTO 3 — Breakeven por steps usava `while` (seção 14)**
+
+**Bug:** O avanço do stop no breakeven usava um loop `while`, fazendo com que múltiplos steps fossem aplicados em um único tick em grandes movimentos de preço. Isso causava saltos abruptos no stop.  
+**Correção:** O `while` foi substituído por `if`, limitando o avanço a um único step por tick, tornando o comportamento mais gradual e previsível.
+
+### **CORREÇÃO PONTO 4 — `bSkip` permanentemente `True` bloqueando todas as entradas normais (seção 8)**
+
+**Bug crítico:** A condição da seção 8 era `(not HasPosition) and (not bPosicaoFoiAberta) and (vEntrada = 0)`. Após a seção 16 limpar o estado (`vEntrada := 0` e `bPosicaoFoiAberta := False`), essa condição era `True` em absolutamente todos os ticks sem posição — não apenas no tick imediatamente após uma zeragem por cobertura. Como a seção 8 executava depois da seção 6 (que reseta `bSkip := False` em cada nova barra), o `bSkip` era imediatamente reforçado como `True`. A seção 13 exige `not bSkip` para armar qualquer gatilho, de modo que **nenhuma entrada normal era jamais armada** após a primeira operação do dia.  
+**Correção:** O `bSkip := True` foi movido para dentro da seção 16, exatamente no bloco que detecta `bPosicaoFoiAberta = True` (zeragem real por cobertura). A seção 8 foi esvaziada — toda a limpeza de estado que ela fazia já era coberta integralmente pela seção 16.
+
+### **CORREÇÃO PONTO 5 — `CancelPendingOrders` nos blocos de armamento cancela ordens de cobertura da posição aberta (seção 13)**
+
+**Bug:** Nos blocos de armamento de gatilho (não de disparo), havia chamadas a `CancelPendingOrders` — uma dentro do `if bArmVenda/bArmCompra` e outra incondicional logo antes de setar o novo gatilho. Como os gatilhos do EA usam ordens a mercado (não ordens pendentes), essas chamadas não tinham finalidade útil. Entretanto, quando havia uma posição aberta (ex.: vendida com `BuyToCoverLimit` e `BuyToCoverStop` pendentes), o `CancelPendingOrders` cancelava essas coberturas durante o armamento, deixando a posição desprotegida entre o armamento e o disparo.  
+**Correção:** Removidos todos os `CancelPendingOrders` dos blocos de armamento (tanto para compra quanto para venda). O `CancelPendingOrders` permanece apenas nos blocos de **disparo** do gatilho (onde a ordem a mercado é de fato enviada), que é o local correto.
+
+### **CORREÇÃO PONTO 6 — `bPosicaoFoiAberta` não zerada antes de `ClosePosition` explícito (seções 6, 14 e 15)**
+
+**Bug:** Quando o EA encerrava a posição via `ClosePosition` explícito (por horário/lock na seção 6, por alvo/invalidação de candle na seção 14, ou por retração de lucro na seção 15), a variável `bPosicaoFoiAberta` permanecia `True`. No tick seguinte, a seção 16 detectava `not HasPosition` com `bPosicaoFoiAberta = True` e logava incorretamente `”POSICAO_ZERADA_POR_COBERTURA_DETECTADA_CORRETAMENTE”` — uma mensagem de diagnóstico enganosa. Além disso, com a CORREÇÃO PONTO 4, isso também disparava `bSkip := True` desnecessariamente (já estava `True` nas seções 14 e 15; e na seção 6 gerava um `bSkip = True` indesejado que, embora inofensivo por causa dos guards de `bHora`/`bLock`, ainda era semanticamente incorreto).  
+**Correção:** Adicionado `bPosicaoFoiAberta := False` imediatamente antes de cada `ClosePosition` explícito nas seções 6, 14 (4 ocorrências) e 15 (1 ocorrência). Assim, a seção 16 distingue corretamente entre zeragem por cobertura (flag ainda `True`) e zeragem explícita (flag já `False`).
+
+## **23\. Conclusão técnica**
 
 O **BoldGlad10** é um EA relativamente sofisticado, com foco em:
 
@@ -370,5 +404,5 @@ O **BoldGlad10** é um EA relativamente sofisticado, com foco em:
 * controlar retomada de operação após a primeira entrada;  
 * gerenciar a posição por várias camadas de defesa e proteção de lucro.
 
-Em essência, ele é um **robô de rompimento com filtro estrutural de consolidação e gestão progressiva de risco**. O núcleo estratégico é bom e bem organizado, mas a primeira operação do dia, nesta versão específica, merece atenção porque o comportamento real do código é mais simples do que a descrição sugere.
+Em essência, ele é um **robô de rompimento com filtro estrutural de consolidação e gestão progressiva de risco**. Após as correções de PONTO 1 a PONTO 6, o código está consistente com a arquitetura descrita — especialmente o fluxo de entradas normais, que estava completamente bloqueado antes da CORREÇÃO PONTO 4. A primeira operação do dia ainda merece atenção (item 21.1), pois o comportamento real é mais simples do que a descrição original sugere.
 
