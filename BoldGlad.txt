@@ -1,0 +1,1545 @@
+﻿{ EA: BoldGlad10 - com faixa de consolidacao }
+{ Resumo: Tick a Tick com operacao excepcional na primeira barra do dia pelos primeiro(s) ticks em relacao a media rapida, permitindo apenas um unico trade nessa barra, reabilitacao apos dois cruzamentos das medias de consolidacao apos pHoraInicio, bloqueio reforcado de novas entradas dentro da faixa de consolidacao, reversao por novo sinal oposto bloqueada enquanto a faixa existir, breakeven por steps, trailing por candle anterior, alvo fixo, stop fixo, gestao por retracao de lucro e logs de diagnostico. }
+
+
+input
+  pMediaConsol1(3);             { periodo da media curta de consolidacao }
+  pMediaConsol2(5);             { periodo da media longa de consolidacao }
+  pTolAproxCruzConsol(5.0);     { tolerancia maxima entre as medias de consolidacao para considerar aproximacao equivalente a cruzamento }
+  pDistanciaMaxCruz(100.0);     { distancia maxima entre dois cruzamentos para formar faixa }
+  pLarguraFaixa(200.0);         { semi-largura da faixa de consolidacao }
+  pDistSaidaFaixa(80.0);        { distancia minima para liberar operacao fora da faixa }
+
+
+  pMediaSinalRapida(5);         { periodo da media rapida de sinal }
+  pMediaSinalLenta(9);          { periodo da media lenta de sinal }
+  pDeslocamentoEntrada(15.0);   { deslocamento do gatilho de entrada sobre max/min da barra [1] }
+  pAlvoLucroPts(5000.0);        { lucro minimo em pontos para ativar retracao }
+  pUsaProtecaoBE(True);         { habilita breakeven por steps }
+  pStepBreakevenPts(50.0);      { tamanho de cada step do breakeven }
+  pUsaTrailingCandle(True);     { habilita trailing pela extrema da barra anterior }
+  pDistAcionaTrailing(200.0);   { mantido por compatibilidade }
+  pLucroMinProtecaoBE(200.0);   { mantido por compatibilidade }
+  pAlvoCandleEntradaPts(300.0); { alvo no proprio candle de entrada }
+  pAlvoFixoPts(500.0);          { alvo fixo da operacao }
+  pStopPerdaTradePts(500.0);    { stop fixo da operacao }
+  pPercRetracaoLucro(80.0);     { percentual de preservacao do lucro maximo }
+  pQtdContratos(10);            { quantidade padrao de contratos }
+  pOffset(30.0);                { mantido por compatibilidade }
+  pHoraInicio(0900);            { horario de inicio das novas operacoes }
+  pHoraFim(1730);               { horario final de operacao }
+  pMetaDiariaFin(5000.0);       { meta diaria financeira }
+  pLossMaxDiarioFin(5000.0);    { perda maxima diaria financeira }
+
+
+var
+  { --- Leituras previas de serie para evitar acessos posicionais em escopos condicionais --- }
+  nDataBarraAnterior        : Integer;
+  vOpen1                    : Float;
+  vHigh1                    : Float;
+  vLow1                     : Float;
+  vClose1                   : Float;
+
+
+  { --- Medias de consolidacao --- }
+  vMC1_1, vMC1_2            : Float;
+  vMC2_1, vMC2_2            : Float;
+  bCruzamentoConsol         : Boolean;
+  vPontoCruzAtual           : Float;
+  vPontoCruzAnterior        : Float;
+  vPontoCruzRecente         : Float;
+  vPontoMedioFaixa          : Float;
+  vTopoFaixa                : Float;
+  vFundoFaixa               : Float;
+  bEmConsolidacao           : Boolean;
+  bFaixaLiberada            : Boolean;
+  bPodeOperarFaixa          : Boolean;
+  bPrecoDentroFaixa         : Boolean;
+  bPrecoForaFaixaOperavel   : Boolean;
+
+
+  { --- Nova contagem por fechamento fora da faixa --- }
+  nContFechaForaAcima       : Integer;
+  nContFechaForaAbaixo      : Integer;
+
+
+  { --- Controle da primeira operacao do dia --- }
+  bEhPrimeiroCandleDia      : Boolean;
+  bPrimeiroCandleProcessado : Boolean;
+  bPrimeiraOperacaoDiaFeita : Boolean;
+  bAguardaDoisCruzPosHora   : Boolean;
+  nQtdCruzPosHora           : Integer;
+
+
+  { --- Confirmacao de cancelamento da faixa --- }
+  bFaixaPendenteCancel      : Boolean;
+  nBarraEntradaFaixa        : Integer;
+  nDirecaoSaidaFaixa        : Integer;
+  bCandleConfForaFaixa      : Boolean;
+
+
+  { --- Medias de sinal --- }
+  vMS1_0, vMS1_1            : Float;
+  vMS2_0, vMS2_1            : Float;
+
+
+  { --- Sinais auxiliares --- }
+  bCandleAltaAtual          : Boolean;
+  bCandleBaixaAtual         : Boolean;
+  bFiltroCompraTick         : Boolean;
+  bFiltroVendaTick          : Boolean;
+  bCandleAltaAnt            : Boolean;
+  bCandleBaixaAnt           : Boolean;
+
+
+  { --- Controle de barra --- }
+  nUltimaBarra              : Integer;
+  bNovaBarra                : Boolean;
+
+
+  { --- Gatilhos armados --- }
+  bArmCompra                : Boolean;
+  bArmVenda                 : Boolean;
+  nBarraSinalCompra         : Integer;
+  nBarraSinalVenda          : Integer;
+  vBaseCompra               : Float;
+  vBaseVenda                : Float;
+  vPrecoC                   : Float;
+  vPrecoV                   : Float;
+
+
+  { --- Reversao --- }
+  vPrecoRevC                : Float;
+  vPrecoRevV                : Float;
+  nQtdRev                   : Integer;
+  bReversaoEnviada          : Boolean;
+
+
+  { --- Posicao --- }
+  vEntrada                  : Float;
+  vRes                      : Float;
+  nBarraEntrada             : Integer;
+  vMaxCandleEntrada         : Float;
+  vMinCandleEntrada         : Float;
+  bTrailingCandleArmado     : Boolean;
+
+
+  { --- Breakeven --- }
+  bProtecaoBEArmada         : Boolean;
+  vNivelProtecaoBE          : Float;
+
+
+  { --- Ordens de cobertura --- }
+  vStopAtual                : Float;
+  vAlvoAtual                : Float;
+  vStopCandidato            : Float;
+
+
+  { --- Gestao por retracao --- }
+  bAlvoAtivado              : Boolean;
+  vLucroAtual               : Float;
+  vMaxLucroAberto           : Float;
+  vNivelSaidaLucro          : Float;
+  vPercRet                  : Float;
+
+
+  { --- Controle diario e horario --- }
+  nData                     : Integer;
+  bHora                     : Boolean;
+  bOpera                    : Boolean;
+  bLock                     : Boolean;
+  bSkip                     : Boolean;
+  vAtuRes                   : Float;
+
+
+  { --- CORRECAO PONTO 1: variavel auxiliar para detectar zeragem por cobertura --- }
+  bPosicaoFoiAberta         : Boolean;
+
+
+begin
+
+
+  { ============================================================ }
+  { 1. RESET INICIAL                                             }
+  { ============================================================ }
+  if (CurrentBar = 1) then
+  begin
+    nData                     := Date;
+    nUltimaBarra              := CurrentBar;
+    bNovaBarra                := False;
+
+
+    bLock                     := False;
+    bSkip                     := False;
+
+
+    bEhPrimeiroCandleDia      := True;
+    bPrimeiroCandleProcessado := False;
+    bPrimeiraOperacaoDiaFeita := False;
+    bAguardaDoisCruzPosHora   := False;
+    nQtdCruzPosHora           := 0;
+
+
+    vMC1_1                    := 0;
+    vMC1_2                    := 0;
+    vMC2_1                    := 0;
+    vMC2_2                    := 0;
+    bCruzamentoConsol         := False;
+    vPontoCruzAtual           := 0;
+    vPontoCruzAnterior        := 0;
+    vPontoCruzRecente         := 0;
+    vPontoMedioFaixa          := 0;
+    vTopoFaixa                := 0;
+    vFundoFaixa               := 0;
+    bEmConsolidacao           := False;
+    bFaixaLiberada            := False;
+    bPodeOperarFaixa          := True;
+    bPrecoDentroFaixa         := False;
+    bPrecoForaFaixaOperavel   := True;
+
+
+    nContFechaForaAcima       := 0;
+    nContFechaForaAbaixo      := 0;
+
+
+    bFaixaPendenteCancel      := False;
+    nBarraEntradaFaixa        := 0;
+    nDirecaoSaidaFaixa        := 0;
+    bCandleConfForaFaixa      := False;
+
+
+    bArmCompra                := False;
+    bArmVenda                 := False;
+    nBarraSinalCompra         := 0;
+    nBarraSinalVenda          := 0;
+    vBaseCompra               := 0;
+    vBaseVenda                := 0;
+    vPrecoC                   := 0;
+    vPrecoV                   := 0;
+    vPrecoRevC                := 0;
+    vPrecoRevV                := 0;
+    nQtdRev                   := 2 * pQtdContratos;
+    bReversaoEnviada          := False;
+
+
+    vEntrada                  := 0;
+    vRes                      := 0;
+    nBarraEntrada             := 0;
+    vMaxCandleEntrada         := 0;
+    vMinCandleEntrada         := 0;
+    bTrailingCandleArmado     := False;
+
+
+    bProtecaoBEArmada         := False;
+    vNivelProtecaoBE          := 0;
+
+
+    vStopAtual                := 0;
+    vAlvoAtual                := 0;
+    vStopCandidato            := 0;
+
+
+    bAlvoAtivado              := False;
+    vLucroAtual               := 0;
+    vMaxLucroAberto           := 0;
+    vNivelSaidaLucro          := 0;
+
+
+    { --- CORRECAO PONTO 1 --- }
+    bPosicaoFoiAberta         := False;
+  end;
+
+
+  { ============================================================ }
+  { 2. DETECCAO DE NOVA BARRA                                    }
+  { ============================================================ }
+  if (CurrentBar <> nUltimaBarra) then
+  begin
+    bNovaBarra   := True;
+    nUltimaBarra := CurrentBar;
+  end
+  else
+    bNovaBarra := False;
+
+
+  { ============================================================ }
+  { 3. LEITURA DAS MEDIAS E SERIES                               }
+  { ============================================================ }
+  vMC1_1 := SMA(pMediaConsol1, tvClose)[1];
+  vMC1_2 := SMA(pMediaConsol1, tvClose)[2];
+  vMC2_1 := SMA(pMediaConsol2, tvClose)[1];
+  vMC2_2 := SMA(pMediaConsol2, tvClose)[2];
+
+
+  vMS1_0 := SMA(pMediaSinalRapida, tvClose)[0];
+  vMS1_1 := SMA(pMediaSinalRapida, tvClose)[1];
+  vMS2_0 := SMA(pMediaSinalLenta, tvClose)[0];
+  vMS2_1 := SMA(pMediaSinalLenta, tvClose)[1];
+
+
+  nDataBarraAnterior := Date[1];
+  vOpen1             := Open[1];
+  vHigh1             := High[1];
+  vLow1              := Low[1];
+  vClose1            := Close[1];
+
+
+  { ============================================================ }
+  { 4. LEITURA DE SINAIS E CONTEXTO                              }
+  { ============================================================ }
+  bCandleAltaAtual   := (Close > Open);
+  bCandleBaixaAtual  := (Close < Open);
+
+
+  bCandleAltaAnt     := (vClose1 > vOpen1);
+  bCandleBaixaAnt    := (vClose1 < vOpen1);
+
+
+  bFiltroCompraTick  := bCandleAltaAtual and (vMS1_0 > vMS2_0);
+  bFiltroVendaTick   := bCandleBaixaAtual and (vMS1_0 < vMS2_0);
+
+
+  bReversaoEnviada   := False;
+  vPercRet           := pPercRetracaoLucro / 100.0;
+  nQtdRev            := 2 * pQtdContratos;
+
+
+  if (CurrentBar = 1) then
+    bEhPrimeiroCandleDia := True
+  else
+    bEhPrimeiroCandleDia := (Date <> nDataBarraAnterior);
+
+
+  { ============================================================ }
+  { 5. RESET DIARIO                                              }
+  { ============================================================ }
+  if (Date <> nData) then
+  begin
+    nData                     := Date;
+
+
+    bLock                     := False;
+    bSkip                     := False;
+
+
+    bEhPrimeiroCandleDia      := True;
+    bPrimeiroCandleProcessado := False;
+    bPrimeiraOperacaoDiaFeita := False;
+    bAguardaDoisCruzPosHora   := False;
+    nQtdCruzPosHora           := 0;
+
+
+    vMC1_1                    := 0;
+    vMC1_2                    := 0;
+    vMC2_1                    := 0;
+    vMC2_2                    := 0;
+    bCruzamentoConsol         := False;
+    vPontoCruzAtual           := 0;
+    vPontoCruzAnterior        := 0;
+    vPontoCruzRecente         := 0;
+    vPontoMedioFaixa          := 0;
+    vTopoFaixa                := 0;
+    vFundoFaixa               := 0;
+    bEmConsolidacao           := False;
+    bFaixaLiberada            := False;
+    bPodeOperarFaixa          := True;
+
+
+    nContFechaForaAcima       := 0;
+    nContFechaForaAbaixo      := 0;
+
+
+    bFaixaPendenteCancel      := False;
+    nBarraEntradaFaixa        := 0;
+    nDirecaoSaidaFaixa        := 0;
+    bCandleConfForaFaixa      := False;
+
+
+    bArmCompra                := False;
+    bArmVenda                 := False;
+    nBarraSinalCompra         := 0;
+    nBarraSinalVenda          := 0;
+    vBaseCompra               := 0;
+    vBaseVenda                := 0;
+    vPrecoC                   := 0;
+    vPrecoV                   := 0;
+    vPrecoRevC                := 0;
+    vPrecoRevV                := 0;
+    bReversaoEnviada          := False;
+
+
+    vEntrada                  := 0;
+    vRes                      := 0;
+    nBarraEntrada             := 0;
+    vMaxCandleEntrada         := 0;
+    vMinCandleEntrada         := 0;
+    bTrailingCandleArmado     := False;
+
+
+    bProtecaoBEArmada         := False;
+    vNivelProtecaoBE          := 0;
+
+
+    vStopAtual                := 0;
+    vAlvoAtual                := 0;
+    vStopCandidato            := 0;
+
+
+    bAlvoAtivado              := False;
+    vLucroAtual               := 0;
+    vMaxLucroAberto           := 0;
+    vNivelSaidaLucro          := 0;
+
+
+    { --- CORRECAO PONTO 1 --- }
+    bPosicaoFoiAberta         := False;
+
+
+    CancelPendingOrders;
+    ConsoleLog("BG10: RESET_DIARIO");
+  end;
+
+
+  { ============================================================ }
+  { 6. CONTROLE DIARIO E HORARIO                                 }
+  { ============================================================ }
+  vAtuRes := DailyResult(False);
+
+
+  if (vAtuRes >= pMetaDiariaFin) then
+    bLock := True;
+
+
+  if (vAtuRes <= (-1 * pLossMaxDiarioFin)) then
+    bLock := True;
+
+
+  bHora  := (Time >= pHoraInicio) and (Time < pHoraFim);
+  bOpera := (Time < pHoraFim);
+
+
+  if (not bOpera) or bLock then
+  begin
+    CancelPendingOrders;
+
+
+    if HasPosition then
+      ClosePosition;
+
+
+    bArmCompra        := False;
+    bArmVenda         := False;
+    nBarraSinalCompra := 0;
+    nBarraSinalVenda  := 0;
+    vBaseCompra       := 0;
+    vBaseVenda        := 0;
+    vPrecoC           := 0;
+    vPrecoV           := 0;
+    vPrecoRevC        := 0;
+    vPrecoRevV        := 0;
+  end;
+
+
+  if bNovaBarra then
+    bSkip := False;
+
+
+  { ============================================================ }
+  { 7. PRIMEIRA OPERACAO EXCEPCIONAL DO DIA                      }
+  { ============================================================ }
+  if bEhPrimeiroCandleDia and (not bPrimeiroCandleProcessado) and (not bLock) and bOpera and (not HasPosition) then
+  begin
+    if (Close > vMS1_0) then
+    begin
+      CancelPendingOrders;
+      BuyAtMarket(pQtdContratos);
+
+
+      bPrimeiroCandleProcessado := True;
+      bPrimeiraOperacaoDiaFeita := True;
+      bAguardaDoisCruzPosHora   := True;
+      nQtdCruzPosHora           := 0;
+
+
+      vPontoCruzAtual           := 0;
+      vPontoCruzAnterior        := 0;
+      vPontoCruzRecente         := 0;
+      vPontoMedioFaixa          := 0;
+      vTopoFaixa                := 0;
+      vFundoFaixa               := 0;
+      bEmConsolidacao           := False;
+      bFaixaLiberada            := False;
+      bFaixaPendenteCancel      := False;
+      nBarraEntradaFaixa        := 0;
+      nDirecaoSaidaFaixa        := 0;
+      nContFechaForaAcima       := 0;
+      nContFechaForaAbaixo      := 0;
+
+
+      ConsoleLog("BG10: PRIMEIRA_OPERACAO_DIA_COMPRA_POR_PRECO_ACIMA_DA_MEDIA_RAPIDA");
+    end
+    else if (Close < vMS1_0) then
+    begin
+      CancelPendingOrders;
+      SellShortAtMarket(pQtdContratos);
+
+
+      bPrimeiroCandleProcessado := True;
+      bPrimeiraOperacaoDiaFeita := True;
+      bAguardaDoisCruzPosHora   := True;
+      nQtdCruzPosHora           := 0;
+
+
+      vPontoCruzAtual           := 0;
+      vPontoCruzAnterior        := 0;
+      vPontoCruzRecente         := 0;
+      vPontoMedioFaixa          := 0;
+      vTopoFaixa                := 0;
+      vFundoFaixa               := 0;
+      bEmConsolidacao           := False;
+      bFaixaLiberada            := False;
+      bFaixaPendenteCancel      := False;
+      nBarraEntradaFaixa        := 0;
+      nDirecaoSaidaFaixa        := 0;
+      nContFechaForaAcima       := 0;
+      nContFechaForaAbaixo      := 0;
+
+
+      ConsoleLog("BG10: PRIMEIRA_OPERACAO_DIA_VENDA_POR_PRECO_ABAIXO_DA_MEDIA_RAPIDA");
+    end;
+  end;
+
+
+  { ============================================================ }
+  { 16. CONTROLE FINAL DE ESTADO                                 }
+  { Movido para antes da secao 8 - CORRECAO PONTO 1             }
+  { ============================================================ }
+  if (not HasPosition) then
+  begin
+    { --- CORRECAO PONTO 1: detecta zeragem por cobertura antes de limpar vEntrada --- }
+    if bPosicaoFoiAberta then
+    begin
+      bPosicaoFoiAberta     := False;
+      ConsoleLog("BG10: POSICAO_ZERADA_POR_COBERTURA_DETECTADA_CORRETAMENTE");
+    end;
+
+
+    vEntrada              := 0;
+    vRes                  := 0;
+    nBarraEntrada         := 0;
+    vMaxCandleEntrada     := 0;
+    vMinCandleEntrada     := 0;
+
+
+    bTrailingCandleArmado := False;
+    bProtecaoBEArmada     := False;
+    vNivelProtecaoBE      := 0;
+
+
+    vStopAtual            := 0;
+    vAlvoAtual            := 0;
+    vStopCandidato        := 0;
+
+
+    vLucroAtual           := 0;
+    vMaxLucroAberto       := 0;
+    vNivelSaidaLucro      := 0;
+    bAlvoAtivado          := False;
+
+
+    vPrecoRevC            := 0;
+    vPrecoRevV            := 0;
+
+
+    bArmCompra            := False;
+    bArmVenda             := False;
+    nBarraSinalCompra     := 0;
+    nBarraSinalVenda      := 0;
+    vBaseCompra           := 0;
+    vBaseVenda            := 0;
+    vPrecoC               := 0;
+    vPrecoV               := 0;
+  end
+  else if (vEntrada = 0) and (not bReversaoEnviada) then
+  begin
+    if IsBought then
+    begin
+      vEntrada   := BuyPrice;
+      vAlvoAtual := vEntrada + pAlvoFixoPts;
+      vStopAtual := vEntrada - pStopPerdaTradePts;
+    end;
+
+
+    if IsSold then
+    begin
+      vEntrada   := SellPrice;
+      vAlvoAtual := vEntrada - pAlvoFixoPts;
+      vStopAtual := vEntrada + pStopPerdaTradePts;
+    end;
+
+
+    nBarraEntrada         := CurrentBar;
+    vMaxCandleEntrada     := High;
+    vMinCandleEntrada     := Low;
+    bTrailingCandleArmado := False;
+    bProtecaoBEArmada     := False;
+    vNivelProtecaoBE      := 0;
+
+
+    { --- CORRECAO PONTO 1: marca que uma posicao foi aberta --- }
+    bPosicaoFoiAberta     := True;
+
+
+    bArmCompra            := False;
+    bArmVenda             := False;
+    nBarraSinalCompra     := 0;
+    nBarraSinalVenda      := 0;
+    vBaseCompra           := 0;
+    vBaseVenda            := 0;
+    vPrecoC               := 0;
+    vPrecoV               := 0;
+
+
+    if bEmConsolidacao and bFaixaLiberada then
+    begin
+      bFaixaPendenteCancel := True;
+      nBarraEntradaFaixa   := CurrentBar;
+
+
+      if IsBought then
+        nDirecaoSaidaFaixa := 1
+      else if IsSold then
+        nDirecaoSaidaFaixa := -1;
+
+
+      ConsoleLog("BG10: JANELA_DA_REGRA_ANTIGA_DE_CANCELAMENTO_DA_FAIXA_INICIADA");
+    end;
+
+
+    if IsBought then
+    begin
+      SellToCoverLimit(vAlvoAtual, pQtdContratos);
+      SellToCoverStop(vStopAtual, vStopAtual, pQtdContratos);
+      ConsoleLog("BG10: POSICAO_COMPRADA_REGISTRADA");
+    end;
+
+
+    if IsSold then
+    begin
+      BuyToCoverLimit(vAlvoAtual, pQtdContratos);
+      BuyToCoverStop(vStopAtual, vStopAtual, pQtdContratos);
+      ConsoleLog("BG10: POSICAO_VENDIDA_REGISTRADA");
+    end;
+  end;
+
+
+  { ============================================================ }
+  { 8. SINCRONIZACAO APOS ZERAGEM POR ORDEM DE COBERTURA         }
+  { CORRECAO PONTO 1: agora executada apos secao 16              }
+  { e usa bPosicaoFoiAberta para detectar o evento corretamente  }
+  { ============================================================ }
+  if (not HasPosition) and (not bPosicaoFoiAberta) and (vEntrada = 0) then
+  begin
+    bSkip                 := True;
+
+
+    bTrailingCandleArmado := False;
+    bProtecaoBEArmada     := False;
+    vNivelProtecaoBE      := 0;
+
+
+    vStopAtual            := 0;
+    vAlvoAtual            := 0;
+    vStopCandidato        := 0;
+
+
+    bAlvoAtivado          := False;
+    vLucroAtual           := 0;
+    vMaxLucroAberto       := 0;
+    vNivelSaidaLucro      := 0;
+
+
+    bArmCompra            := False;
+    bArmVenda             := False;
+    nBarraSinalCompra     := 0;
+    nBarraSinalVenda      := 0;
+    vBaseCompra           := 0;
+    vBaseVenda            := 0;
+    vPrecoC               := 0;
+    vPrecoV               := 0;
+    vPrecoRevC            := 0;
+    vPrecoRevV            := 0;
+  end;
+
+
+  { ============================================================ }
+  { 9. DETECCAO DE CRUZAMENTOS E CONSTRUCAO DA FAIXA             }
+  { ============================================================ }
+  if bNovaBarra then
+  begin
+    bCruzamentoConsol := False;
+
+
+    if (((vMC1_2 <= vMC2_2) and (vMC1_1 > vMC2_1)) or
+        ((vMC1_2 >= vMC2_2) and (vMC1_1 < vMC2_1))) then
+    begin
+      bCruzamentoConsol := True;
+      vPontoCruzAtual   := (vMC1_1 + vMC2_1) / 2.0;
+      ConsoleLog("BG10: CRUZAMENTO_CONSOLIDACAO_DETECTADO");
+    end
+    else if (Abs(vMC1_1 - vMC2_1) <= pTolAproxCruzConsol) and
+            (Abs(vMC1_2 - vMC2_2) > pTolAproxCruzConsol) then
+    begin
+      bCruzamentoConsol := True;
+      vPontoCruzAtual   := (vMC1_1 + vMC2_1) / 2.0;
+      ConsoleLog("BG10: APROXIMACAO_DE_CONSOLIDACAO_EQUIVALENTE_A_CRUZAMENTO");
+    end;
+
+
+    if bAguardaDoisCruzPosHora then
+    begin
+      if bHora and bCruzamentoConsol then
+      begin
+        if (nQtdCruzPosHora = 0) then
+        begin
+          nQtdCruzPosHora := 1;
+          ConsoleLog("BG10: PRIMEIRO_CRUZAMENTO_POS_HORA");
+        end
+        else
+        begin
+          nQtdCruzPosHora         := 0;
+          bAguardaDoisCruzPosHora := False;
+
+
+          vPontoCruzAtual         := 0;
+          vPontoCruzAnterior      := 0;
+          vPontoCruzRecente       := 0;
+          vPontoMedioFaixa        := 0;
+          vTopoFaixa              := 0;
+          vFundoFaixa             := 0;
+          bEmConsolidacao         := False;
+          bFaixaLiberada          := False;
+          bFaixaPendenteCancel    := False;
+          nBarraEntradaFaixa      := 0;
+          nDirecaoSaidaFaixa      := 0;
+          nContFechaForaAcima     := 0;
+          nContFechaForaAbaixo    := 0;
+
+
+          ConsoleLog("BG10: SEGUNDO_CRUZAMENTO_POS_HORA_LIBEROU_OPERACAO");
+        end;
+      end;
+    end
+    else
+    begin
+      if (not bEmConsolidacao) and bCruzamentoConsol then
+      begin
+        if (vPontoCruzRecente > 0) then
+          vPontoCruzAnterior := vPontoCruzRecente;
+
+
+        vPontoCruzRecente := vPontoCruzAtual;
+
+
+        if (vPontoCruzAnterior > 0) and (vPontoCruzRecente > 0) then
+        begin
+          if (Abs(vPontoCruzRecente - vPontoCruzAnterior) <= pDistanciaMaxCruz) then
+          begin
+            vPontoMedioFaixa := (vPontoCruzAnterior + vPontoCruzRecente) / 2.0;
+            vTopoFaixa       := vPontoMedioFaixa + pLarguraFaixa;
+            vFundoFaixa      := vPontoMedioFaixa - pLarguraFaixa;
+            bEmConsolidacao  := True;
+            bFaixaLiberada   := False;
+
+
+            nContFechaForaAcima  := 0;
+            nContFechaForaAbaixo := 0;
+
+
+            CancelPendingOrders;
+            bArmCompra        := False;
+            bArmVenda         := False;
+            nBarraSinalCompra := 0;
+            nBarraSinalVenda  := 0;
+            vBaseCompra       := 0;
+            vBaseVenda        := 0;
+            vPrecoC           := 0;
+            vPrecoV           := 0;
+            vPrecoRevC        := 0;
+            vPrecoRevV        := 0;
+
+
+            ConsoleLog(
+              "BG10: FAIXA_FORMADA" +
+              " | MedioCruz=" + FloatToString(vPontoMedioFaixa, 2) +
+              " | Topo=" + FloatToString(vTopoFaixa, 2) +
+              " | Fundo=" + FloatToString(vFundoFaixa, 2)
+            );
+          end;
+        end;
+      end;
+    end;
+  end;
+
+
+  { ============================================================ }
+  { 10. CONTROLE DINAMICO DA FAIXA                               }
+  { ============================================================ }
+  if bEmConsolidacao then
+  begin
+    if (not bFaixaLiberada) then
+    begin
+      if (Close >= (vTopoFaixa + pDistSaidaFaixa)) or (Close <= (vFundoFaixa - pDistSaidaFaixa)) then
+      begin
+        bFaixaLiberada := True;
+        ConsoleLog("BG10: FAIXA_LIBERADA_POR_DISTANCIA");
+      end;
+    end
+    else
+    begin
+      if (Close <= vTopoFaixa) and (Close >= vFundoFaixa) then
+      begin
+        bFaixaLiberada := False;
+
+
+        nContFechaForaAcima  := 0;
+        nContFechaForaAbaixo := 0;
+
+
+        CancelPendingOrders;
+        bArmCompra        := False;
+        bArmVenda         := False;
+        nBarraSinalCompra := 0;
+        nBarraSinalVenda  := 0;
+        vBaseCompra       := 0;
+        vBaseVenda        := 0;
+        vPrecoC           := 0;
+        vPrecoV           := 0;
+        vPrecoRevC        := 0;
+        vPrecoRevV        := 0;
+
+
+        ConsoleLog("BG10: FAIXA_REBLOQUEADA_RETORNO_PARA_DENTRO");
+      end;
+    end;
+  end;
+
+
+  if bEmConsolidacao then
+  begin
+    bPrecoDentroFaixa       := (Close <= vTopoFaixa) and (Close >= vFundoFaixa);
+    bPrecoForaFaixaOperavel := (Close >= (vTopoFaixa + pDistSaidaFaixa)) or
+                               (Close <= (vFundoFaixa - pDistSaidaFaixa));
+  end
+  else
+  begin
+    bPrecoDentroFaixa       := False;
+    bPrecoForaFaixaOperavel := True;
+  end;
+
+
+  if bNovaBarra and bFaixaPendenteCancel and bEmConsolidacao then
+  begin
+    if (CurrentBar = (nBarraEntradaFaixa + 2)) or (CurrentBar = (nBarraEntradaFaixa + 3)) then
+    begin
+      bCandleConfForaFaixa := False;
+
+
+      if (nDirecaoSaidaFaixa = 1) then
+        bCandleConfForaFaixa := (vLow1 > vTopoFaixa);
+
+
+      if (nDirecaoSaidaFaixa = -1) then
+        bCandleConfForaFaixa := (vHigh1 < vFundoFaixa);
+
+
+      if (not bCandleConfForaFaixa) then
+      begin
+        bFaixaPendenteCancel := False;
+        nBarraEntradaFaixa   := 0;
+        nDirecaoSaidaFaixa   := 0;
+        ConsoleLog("BG10: CANCELAMENTO_DA_FAIXA_ABORTADO_PELA_REGRA_ANTIGA");
+      end
+      else if (CurrentBar = (nBarraEntradaFaixa + 3)) then
+      begin
+        bFaixaPendenteCancel := False;
+        nBarraEntradaFaixa   := 0;
+        nDirecaoSaidaFaixa   := 0;
+
+
+        bEmConsolidacao      := False;
+        bFaixaLiberada       := False;
+        vPontoMedioFaixa     := 0;
+        vTopoFaixa           := 0;
+        vFundoFaixa          := 0;
+        nContFechaForaAcima  := 0;
+        nContFechaForaAbaixo := 0;
+
+
+        ConsoleLog("BG10: FAIXA_CANCELADA_PELA_REGRA_ANTIGA");
+      end;
+    end;
+  end;
+
+
+  if bNovaBarra then
+  begin
+    if bEmConsolidacao then
+    begin
+      if (vClose1 > vTopoFaixa) then
+      begin
+        nContFechaForaAcima  := nContFechaForaAcima + 1;
+        nContFechaForaAbaixo := 0;
+
+
+        if (nContFechaForaAcima = 1) then
+          ConsoleLog("BG10: 1_FECHAMENTO_CONSECUTIVO_ACIMA_DA_FAIXA")
+        else if (nContFechaForaAcima = 2) then
+          ConsoleLog("BG10: 2_FECHAMENTOS_CONSECUTIVOS_ACIMA_DA_FAIXA")
+        else if (nContFechaForaAcima = 3) then
+          ConsoleLog("BG10: 3_FECHAMENTOS_CONSECUTIVOS_ACIMA_DA_FAIXA");
+      end
+      else if (vClose1 < vFundoFaixa) then
+      begin
+        nContFechaForaAbaixo := nContFechaForaAbaixo + 1;
+        nContFechaForaAcima  := 0;
+
+
+        if (nContFechaForaAbaixo = 1) then
+          ConsoleLog("BG10: 1_FECHAMENTO_CONSECUTIVO_ABAIXO_DA_FAIXA")
+        else if (nContFechaForaAbaixo = 2) then
+          ConsoleLog("BG10: 2_FECHAMENTOS_CONSECUTIVOS_ABAIXO_DA_FAIXA")
+        else if (nContFechaForaAbaixo = 3) then
+          ConsoleLog("BG10: 3_FECHAMENTOS_CONSECUTIVOS_ABAIXO_DA_FAIXA");
+      end
+      else
+      begin
+        if (nContFechaForaAcima > 0) or (nContFechaForaAbaixo > 0) then
+          ConsoleLog("BG10: CONTAGEM_DE_FECHAMENTOS_FORA_DA_FAIXA_REINICIADA");
+
+
+        nContFechaForaAcima  := 0;
+        nContFechaForaAbaixo := 0;
+      end;
+
+
+      if (nContFechaForaAcima >= 3) or (nContFechaForaAbaixo >= 3) then
+      begin
+        bEmConsolidacao        := False;
+        bFaixaLiberada         := False;
+        bFaixaPendenteCancel   := False;
+        nBarraEntradaFaixa     := 0;
+        nDirecaoSaidaFaixa     := 0;
+        bCandleConfForaFaixa   := False;
+        vPontoMedioFaixa       := 0;
+        vTopoFaixa             := 0;
+        vFundoFaixa            := 0;
+        nContFechaForaAcima    := 0;
+        nContFechaForaAbaixo   := 0;
+
+
+        ConsoleLog("BG10: FAIXA_CANCELADA_POR_3_FECHAMENTOS_CONSECUTIVOS_FORA");
+      end;
+    end
+    else
+    begin
+      nContFechaForaAcima  := 0;
+      nContFechaForaAbaixo := 0;
+    end;
+  end;
+
+
+  { ============================================================ }
+  { 11. PERMISSAO FINAL DE OPERACAO                              }
+  { ============================================================ }
+  if bAguardaDoisCruzPosHora then
+    bPodeOperarFaixa := False
+  else
+    bPodeOperarFaixa := bPrecoForaFaixaOperavel;
+
+
+  if (bAguardaDoisCruzPosHora) or (bEmConsolidacao and (not bPrecoForaFaixaOperavel)) then
+  begin
+    CancelPendingOrders;
+
+
+    bArmCompra        := False;
+    bArmVenda         := False;
+    nBarraSinalCompra := 0;
+    nBarraSinalVenda  := 0;
+    vBaseCompra       := 0;
+    vBaseVenda        := 0;
+    vPrecoC           := 0;
+    vPrecoV           := 0;
+    vPrecoRevC        := 0;
+    vPrecoRevV        := 0;
+  end;
+
+
+  if bNovaBarra then
+  begin
+    if bLock then
+      ConsoleLog("BG10: BLOQUEADO_POR_META_OU_LOSS_DIARIO");
+
+
+    if bAguardaDoisCruzPosHora then
+      ConsoleLog("BG10: AGUARDANDO_DOIS_CRUZAMENTOS_POS_HORA");
+
+
+    if bEmConsolidacao then
+      ConsoleLog("BG10: EM_CONSOLIDACAO");
+
+
+    if bEmConsolidacao and bFaixaLiberada then
+      ConsoleLog("BG10: FAIXA_EXISTE_MAS_ESTA_LIBERADA_OPERACIONALMENTE");
+
+
+    if (not bPodeOperarFaixa) then
+      ConsoleLog("BG10: PERMISSAO_FINAL_NEGADA_PELA_LOGICA_DA_FAIXA");
+
+
+    if (not bPrecoForaFaixaOperavel) then
+      ConsoleLog("BG10: PRECO_AINDA_NAO_ESTA_FORA_DA_FAIXA_EM_CONDICAO_OPERAVEL");
+
+
+    if (not bHora) then
+      ConsoleLog("BG10: FORA_DA_JANELA_DE_ENTRADA");
+
+
+    if bSkip then
+      ConsoleLog("BG10: BLOQUEIO_TEMPORARIO_DE_REENTRADA_POR_SKIP");
+
+
+    if (not bLock) and (not bAguardaDoisCruzPosHora) and bPodeOperarFaixa and bPrecoForaFaixaOperavel and bHora and (not bSkip) then
+      ConsoleLog("BG10: FLUXO_HABILITADO_PARA_OPERAR");
+  end;
+
+
+  { ============================================================ }
+  { 12. EXPIRACAO DOS GATILHOS ARMADOS                           }
+  { ============================================================ }
+  if bArmCompra then
+  begin
+    if (CurrentBar > nBarraSinalCompra) then
+    begin
+      CancelPendingOrders;
+      bArmCompra        := False;
+      nBarraSinalCompra := 0;
+      vBaseCompra       := 0;
+      vPrecoC           := 0;
+      ConsoleLog("BG10: GATILHO_DE_COMPRA_EXPIRADO");
+    end;
+  end;
+
+
+  if bArmVenda then
+  begin
+    if (CurrentBar > nBarraSinalVenda) then
+    begin
+      CancelPendingOrders;
+      bArmVenda         := False;
+      nBarraSinalVenda  := 0;
+      vBaseVenda        := 0;
+      vPrecoV           := 0;
+      ConsoleLog("BG10: GATILHO_DE_VENDA_EXPIRADO");
+    end;
+  end;
+
+
+  { ============================================================ }
+  { 13. ENTRADAS E REVERSOES                                     }
+  { CORRECAO PONTO 2: verificacao de bPrecoForaFaixaOperavel     }
+  { adicionada tambem no armamento dos gatilhos                  }
+  { ============================================================ }
+  if (not bEhPrimeiroCandleDia) and bHora and (not bLock) and (not bAguardaDoisCruzPosHora) and bPodeOperarFaixa and bPrecoForaFaixaOperavel then
+  begin
+    if bArmCompra and (vMS1_0 <= vMS2_0) then
+    begin
+      CancelPendingOrders;
+      bArmCompra        := False;
+      nBarraSinalCompra := 0;
+      vBaseCompra       := 0;
+      vPrecoC           := 0;
+      vPrecoRevC        := 0;
+      ConsoleLog("BG10: GATILHO_DE_COMPRA_CANCELADO_POR_PERDA_DE_ALINHAMENTO");
+    end;
+
+
+    if bArmVenda and (vMS1_0 >= vMS2_0) then
+    begin
+      CancelPendingOrders;
+      bArmVenda         := False;
+      nBarraSinalVenda  := 0;
+      vBaseVenda        := 0;
+      vPrecoV           := 0;
+      vPrecoRevV        := 0;
+      ConsoleLog("BG10: GATILHO_DE_VENDA_CANCELADO_POR_PERDA_DE_ALINHAMENTO");
+    end;
+
+
+    if (not bSkip) then
+    begin
+      { --- CORRECAO PONTO 2: armamento so ocorre se bPrecoForaFaixaOperavel for True --- }
+      if (vMS1_0 > vMS2_0) and
+         ((not HasPosition) or (IsSold and (not bEmConsolidacao))) and
+         (not bArmCompra) and
+         bPrecoForaFaixaOperavel then
+      begin
+        if bArmVenda then
+        begin
+          CancelPendingOrders;
+          bArmVenda         := False;
+          nBarraSinalVenda  := 0;
+          vBaseVenda        := 0;
+          vPrecoV           := 0;
+          vPrecoRevV        := 0;
+        end;
+
+
+        vBaseCompra := vHigh1;
+        vPrecoRevC  := vBaseCompra + pDeslocamentoEntrada;
+        vPrecoC     := vPrecoRevC;
+
+
+        CancelPendingOrders;
+        bArmCompra        := True;
+        nBarraSinalCompra := CurrentBar;
+        ConsoleLog("BG10: GATILHO_DE_COMPRA_ARMADO");
+      end;
+
+
+      { --- CORRECAO PONTO 2: armamento so ocorre se bPrecoForaFaixaOperavel for True --- }
+      if (vMS1_0 < vMS2_0) and
+         ((not HasPosition) or (IsBought and (not bEmConsolidacao))) and
+         (not bArmVenda) and
+         bPrecoForaFaixaOperavel then
+      begin
+        if bArmCompra then
+        begin
+          CancelPendingOrders;
+          bArmCompra        := False;
+          nBarraSinalCompra := 0;
+          vBaseCompra       := 0;
+          vPrecoC           := 0;
+          vPrecoRevC        := 0;
+        end;
+
+
+        vBaseVenda := vLow1;
+        vPrecoRevV := vBaseVenda - pDeslocamentoEntrada;
+        vPrecoV    := vPrecoRevV;
+
+
+        CancelPendingOrders;
+        bArmVenda         := True;
+        nBarraSinalVenda  := CurrentBar;
+        ConsoleLog("BG10: GATILHO_DE_VENDA_ARMADO");
+      end;
+    end;
+
+
+    if bArmCompra and (not bSkip) and bPodeOperarFaixa and bPrecoForaFaixaOperavel then
+    begin
+      if (High >= vPrecoC) then
+      begin
+        if (vMS1_0 > vMS2_0) then
+        begin
+          CancelPendingOrders;
+
+
+          if HasPosition and IsSold then
+          begin
+            if (not bEmConsolidacao) then
+            begin
+              BuyAtMarket(nQtdRev);
+
+
+              bReversaoEnviada      := True;
+              vEntrada              := 0;
+              vRes                  := 0;
+              bTrailingCandleArmado := False;
+              bProtecaoBEArmada     := False;
+              vNivelProtecaoBE      := 0;
+              vStopAtual            := 0;
+              vAlvoAtual            := 0;
+              bAlvoAtivado          := False;
+              vLucroAtual           := 0;
+              vMaxLucroAberto       := 0;
+              vNivelSaidaLucro      := 0;
+
+
+              ConsoleLog("BG10: REVERSAO_PARA_COMPRA_EXECUTADA");
+            end
+            else
+              ConsoleLog("BG10: REVERSAO_PARA_COMPRA_BLOQUEADA_POR_CONSOLIDACAO");
+          end
+          else if (not HasPosition) then
+          begin
+            BuyAtMarket(pQtdContratos);
+            ConsoleLog("BG10: ENTRADA_COMPRA_EXECUTADA");
+          end;
+
+
+          bArmCompra        := False;
+          nBarraSinalCompra := 0;
+          vBaseCompra       := 0;
+          vPrecoC           := 0;
+          vPrecoRevC        := 0;
+        end
+        else
+        begin
+          CancelPendingOrders;
+          bArmCompra        := False;
+          nBarraSinalCompra := 0;
+          vBaseCompra       := 0;
+          vPrecoC           := 0;
+          vPrecoRevC        := 0;
+          ConsoleLog("BG10: DISPARO_DE_COMPRA_ABORTADO_POR_PERDA_DE_ALINHAMENTO");
+        end;
+      end;
+    end;
+
+
+    if bArmVenda and (not bSkip) and bPodeOperarFaixa and bPrecoForaFaixaOperavel then
+    begin
+      if (Low <= vPrecoV) then
+      begin
+        if (vMS1_0 < vMS2_0) then
+        begin
+          CancelPendingOrders;
+
+
+          if HasPosition and IsBought then
+          begin
+            if (not bEmConsolidacao) then
+            begin
+              SellShortAtMarket(nQtdRev);
+
+
+              bReversaoEnviada      := True;
+              vEntrada              := 0;
+              vRes                  := 0;
+              bTrailingCandleArmado := False;
+              bProtecaoBEArmada     := False;
+              vNivelProtecaoBE      := 0;
+              vStopAtual            := 0;
+              vAlvoAtual            := 0;
+              bAlvoAtivado          := False;
+              vLucroAtual           := 0;
+              vMaxLucroAberto       := 0;
+              vNivelSaidaLucro      := 0;
+
+
+              ConsoleLog("BG10: REVERSAO_PARA_VENDA_EXECUTADA");
+            end
+            else
+              ConsoleLog("BG10: REVERSAO_PARA_VENDA_BLOQUEADA_POR_CONSOLIDACAO");
+          end
+          else if (not HasPosition) then
+          begin
+            SellShortAtMarket(pQtdContratos);
+            ConsoleLog("BG10: ENTRADA_VENDA_EXECUTADA");
+          end;
+
+
+          bArmVenda         := False;
+          nBarraSinalVenda  := 0;
+          vBaseVenda        := 0;
+          vPrecoV           := 0;
+          vPrecoRevV        := 0;
+        end
+        else
+        begin
+          CancelPendingOrders;
+          bArmVenda         := False;
+          nBarraSinalVenda  := 0;
+          vBaseVenda        := 0;
+          vPrecoV           := 0;
+          vPrecoRevV        := 0;
+          ConsoleLog("BG10: DISPARO_DE_VENDA_ABORTADO_POR_PERDA_DE_ALINHAMENTO");
+        end;
+      end;
+    end;
+  end;
+
+
+  { ============================================================ }
+  { 14. GESTAO DA POSICAO                                        }
+  { ============================================================ }
+  if HasPosition and (vEntrada > 0) then
+  begin
+    if (nBarraEntrada > 0) and (CurrentBar = nBarraEntrada) then
+    begin
+      vMaxCandleEntrada := High;
+      vMinCandleEntrada := Low;
+    end;
+
+
+    if IsBought then
+      vLucroAtual := Close - vEntrada;
+
+
+    if IsSold then
+      vLucroAtual := vEntrada - Close;
+
+
+    if (nBarraEntrada > 0) and (CurrentBar = nBarraEntrada) and IsBought and (High >= (vEntrada + pAlvoCandleEntradaPts)) then
+    begin
+      CancelPendingOrders;
+      ClosePosition;
+      bSkip := True;
+
+
+      nBarraEntrada         := 0;
+      vMaxCandleEntrada     := 0;
+      vMinCandleEntrada     := 0;
+      bTrailingCandleArmado := False;
+      bProtecaoBEArmada     := False;
+      vNivelProtecaoBE      := 0;
+      vStopAtual            := 0;
+      vAlvoAtual            := 0;
+      bAlvoAtivado          := False;
+      vLucroAtual           := 0;
+      vMaxLucroAberto       := 0;
+      vNivelSaidaLucro      := 0;
+      vPrecoRevC            := 0;
+      vPrecoRevV            := 0;
+
+
+      ConsoleLog("BG10: SAIDA_POR_ALVO_NO_CANDLE_DE_ENTRADA_COMPRA");
+    end
+    else if (nBarraEntrada > 0) and (CurrentBar = nBarraEntrada) and IsSold and (Low <= (vEntrada - pAlvoCandleEntradaPts)) then
+    begin
+      CancelPendingOrders;
+      ClosePosition;
+      bSkip := True;
+
+
+      nBarraEntrada         := 0;
+      vMaxCandleEntrada     := 0;
+      vMinCandleEntrada     := 0;
+      bTrailingCandleArmado := False;
+      bProtecaoBEArmada     := False;
+      vNivelProtecaoBE      := 0;
+      vStopAtual            := 0;
+      vAlvoAtual            := 0;
+      bAlvoAtivado          := False;
+      vLucroAtual           := 0;
+      vMaxLucroAberto       := 0;
+      vNivelSaidaLucro      := 0;
+      vPrecoRevC            := 0;
+      vPrecoRevV            := 0;
+
+
+      ConsoleLog("BG10: SAIDA_POR_ALVO_NO_CANDLE_DE_ENTRADA_VENDA");
+    end
+    else if (nBarraEntrada > 0) and (CurrentBar = (nBarraEntrada + 1)) and IsBought and (Low < vMinCandleEntrada) then
+    begin
+      CancelPendingOrders;
+      ClosePosition;
+      bSkip := True;
+
+
+      nBarraEntrada         := 0;
+      vMaxCandleEntrada     := 0;
+      vMinCandleEntrada     := 0;
+      bTrailingCandleArmado := False;
+      bProtecaoBEArmada     := False;
+      vNivelProtecaoBE      := 0;
+      vStopAtual            := 0;
+      vAlvoAtual            := 0;
+      bAlvoAtivado          := False;
+      vLucroAtual           := 0;
+      vMaxLucroAberto       := 0;
+      vNivelSaidaLucro      := 0;
+      vPrecoRevC            := 0;
+      vPrecoRevV            := 0;
+
+
+      ConsoleLog("BG10: SAIDA_NO_CANDLE_SEGUINTE_DA_ENTRADA_COMPRA");
+    end
+    else if (nBarraEntrada > 0) and (CurrentBar = (nBarraEntrada + 1)) and IsSold and (High > vMaxCandleEntrada) then
+    begin
+      CancelPendingOrders;
+      ClosePosition;
+      bSkip := True;
+
+
+      nBarraEntrada         := 0;
+      vMaxCandleEntrada     := 0;
+      vMinCandleEntrada     := 0;
+      bTrailingCandleArmado := False;
+      bProtecaoBEArmada     := False;
+      vNivelProtecaoBE      := 0;
+      vStopAtual            := 0;
+      vAlvoAtual            := 0;
+      bAlvoAtivado          := False;
+      vLucroAtual           := 0;
+      vMaxLucroAberto       := 0;
+      vNivelSaidaLucro      := 0;
+      vPrecoRevC            := 0;
+      vPrecoRevV            := 0;
+
+
+      ConsoleLog("BG10: SAIDA_NO_CANDLE_SEGUINTE_DA_ENTRADA_VENDA");
+    end
+    else
+    begin
+      if IsBought then
+      begin
+        vAlvoAtual := vEntrada + pAlvoFixoPts;
+
+
+        if (vStopAtual = 0) then
+          vStopAtual := vEntrada - pStopPerdaTradePts;
+      end;
+
+
+      if IsSold then
+      begin
+        vAlvoAtual := vEntrada - pAlvoFixoPts;
+
+
+        if (vStopAtual = 0) then
+          vStopAtual := vEntrada + pStopPerdaTradePts;
+      end;
+
+
+      { --- CORRECAO PONTO 3: while substituido por if para avancar um step por tick --- }
+      if (not pUsaProtecaoBE) or (pStepBreakevenPts <= 0) then
+      begin
+        bProtecaoBEArmada := False;
+        vNivelProtecaoBE  := 0;
+      end
+      else if (not bProtecaoBEArmada) then
+      begin
+        if IsBought then
+        begin
+          if (vStopAtual < vEntrada) and (High >= (vStopAtual + pStopPerdaTradePts + pStepBreakevenPts)) then
+            vStopAtual := vStopAtual + pStepBreakevenPts;
+
+
+          if (vStopAtual >= vEntrada) then
+          begin
+            vStopAtual        := vEntrada;
+            bProtecaoBEArmada := True;
+            vNivelProtecaoBE  := vEntrada;
+            ConsoleLog("BG10: BREAKEVEN_ARMADO_COMPRA");
+          end;
+        end;
+
+
+        if IsSold then
+        begin
+          if (vStopAtual > vEntrada) and (Low <= (vStopAtual - pStopPerdaTradePts - pStepBreakevenPts)) then
+            vStopAtual := vStopAtual - pStepBreakevenPts;
+
+
+          if (vStopAtual <= vEntrada) then
+          begin
+            vStopAtual        := vEntrada;
+            bProtecaoBEArmada := True;
+            vNivelProtecaoBE  := vEntrada;
+            ConsoleLog("BG10: BREAKEVEN_ARMADO_VENDA");
+          end;
+        end;
+      end;
+
+
+      if (not pUsaTrailingCandle) then
+        bTrailingCandleArmado := False
+      else
+        bTrailingCandleArmado := bProtecaoBEArmada;
+
+
+      if pUsaTrailingCandle and bTrailingCandleArmado and bNovaBarra then
+      begin
+        if IsBought then
+        begin
+          vStopCandidato := vLow1;
+          if (vStopCandidato > vStopAtual) then
+          begin
+            vStopAtual := vStopCandidato;
+            ConsoleLog("BG10: TRAILING_ATUALIZADO_COMPRA");
+          end;
+        end;
+
+
+        if IsSold then
+        begin
+          vStopCandidato := vHigh1;
+          if (vStopCandidato < vStopAtual) then
+          begin
+            vStopAtual := vStopCandidato;
+            ConsoleLog("BG10: TRAILING_ATUALIZADO_VENDA");
+          end;
+        end;
+      end;
+
+
+      if IsBought then
+      begin
+        SellToCoverLimit(vAlvoAtual, pQtdContratos);
+        SellToCoverStop(vStopAtual, vStopAtual, pQtdContratos);
+      end;
+
+
+      if IsSold then
+      begin
+        BuyToCoverLimit(vAlvoAtual, pQtdContratos);
+        BuyToCoverStop(vStopAtual, vStopAtual, pQtdContratos);
+      end;
+    end;
+  end;
+
+
+  { ============================================================ }
+  { 15. GESTAO POR RETRACAO DO LUCRO MAXIMO                      }
+  { ============================================================ }
+  if bNovaBarra and HasPosition and (vEntrada > 0) then
+  begin
+    if IsBought then
+      vLucroAtual := vClose1 - vEntrada;
+
+
+    if IsSold then
+      vLucroAtual := vEntrada - vClose1;
+
+
+    if (not bAlvoAtivado) and (vLucroAtual >= pAlvoLucroPts) then
+    begin
+      bAlvoAtivado     := True;
+      vMaxLucroAberto  := vLucroAtual;
+      vNivelSaidaLucro := vMaxLucroAberto * vPercRet;
+      ConsoleLog("BG10: GESTAO_POR_RETRACAO_ATIVADA");
+    end;
+
+
+    if bAlvoAtivado then
+    begin
+      if (vLucroAtual > vMaxLucroAberto) then
+      begin
+        vMaxLucroAberto  := vLucroAtual;
+        vNivelSaidaLucro := vMaxLucroAberto * vPercRet;
+      end;
+    end;
+
+
+    if bAlvoAtivado and (vLucroAtual <= vNivelSaidaLucro) then
+    begin
+      CancelPendingOrders;
+      ClosePosition;
+      bSkip := True;
+      bTrailingCandleArmado := False;
+      bProtecaoBEArmada     := False;
+      vNivelProtecaoBE      := 0;
+      vStopAtual            := 0;
+      vAlvoAtual            := 0;
+
+
+      ConsoleLog("BG10: SAIDA_POR_RETRACAO_DO_LUCRO_MAXIMO");
+    end;
+  end;
+
+
+end;
