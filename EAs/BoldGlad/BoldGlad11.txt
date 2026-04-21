@@ -1,0 +1,676 @@
+{ ================================================================== }
+{ EA: BoldGlad11                                                    }
+{ ================================================================== }
+{ Robo de execucao NTSL para ProfitUltra - Tick a Tick              }
+{                                                                    }
+{ Logica: cruzamento de duas medias aritmeticas (M1 e M2) com       }
+{ entrada no rompimento da maxima/minima da vela anterior.           }
+{ M1 = media aritmetica rapida (default 5 periodos)                 }
+{ M2 = media aritmetica lenta  (default 9 periodos)                 }
+{                                                                    }
+{ Compra: M1 > M2 + vela anterior de alta + rompimento max+offset   }
+{ Venda:  M1 < M2 + vela anterior de baixa + rompimento min-offset  }
+{                                                                    }
+{ Reversao: se as medias inverterem enquanto ha posicao aberta,     }
+{ a posicao e fechada imediatamente. O gatilho na direcao contraria  }
+{ e armado normalmente na proxima vela nova.                         }
+{                                                                    }
+{ Faixa de consolidacao: formada quando dois cruzamentos consecutivos}
+{ de M1 e M2 estao a uma distancia <= pDistMaxCruz. Topo e fundo da  }
+{ faixa sao determinados pela varredura das N velas anteriores ao    }
+{ primeiro cruzamento ate a vela do segundo cruzamento, registrando  }
+{ a maior maxima e a menor minima encontradas na janela.             }
+{ EA so volta a operar quando preco se afasta pDistSaidaFaixa do     }
+{ topo ou fundo.                                                     }
+{                                                                    }
+{ Gerenciamento: stop fixo, alvo fixo, breakeven por steps (opcional)}
+{ trailing stop na minima/maxima do candle anterior (opcional).      }
+{ ================================================================== }
+
+
+input
+  { --- Medias moveis --- }
+  pPeriodoM1(5);                  { periodo da media rapida M1 }
+  pPeriodoM2(9);                  { periodo da media lenta M2  }
+
+  { --- Gatilho de entrada --- }
+  pOffsetEntrada(5.0);            { deslocamento em pts alem da max/min da vela anterior }
+
+  { --- Stop e alvo --- }
+  pStopFixoPts(150.0);            { stop loss fixo em pontos }
+  pAlvoFixoPts(500.0);            { take profit fixo em pontos }
+
+  { --- Breakeven --- }
+  pUsarBreakeven(True);           { ativar gerenciamento de breakeven }
+  pDistAcionaBE(200.0);           { pts a favor para acionar breakeven }
+  pStepBreakevenPts(50.0);        { tamanho de cada step do breakeven }
+
+  { --- Trailing stop --- }
+  pUsarTrailing(True);            { ativar trailing stop }
+  pDistAcionaTrailing(200.0);     { pts a favor para acionar trailing stop }
+
+  { --- Quantidade --- }
+  pQtdContratos(10);              { quantidade de contratos }
+
+  { --- Horario --- }
+  pHoraInicio(0905);              { horario de inicio (HHMM) }
+  pHoraFim(1730);                 { horario de termino (HHMM) }
+
+  { --- Gestao diaria --- }
+  pMetaDiariaPts(2000.0);         { ganho maximo no dia em pontos }
+  pLossMaxDiarioPts(1000.0);      { perda maxima no dia em pontos }
+
+  { --- Faixa de consolidacao --- }
+  pDistMaxCruz(50.0);             { distancia maxima entre dois cruzamentos para formar faixa }
+  pDistSaidaFaixa(50.0);          { distancia para o preco se afastar da faixa e liberar operacao }
+  pVelasAntesPrimCruz(5);         { qtde de velas anteriores ao 1o cruzamento incluidas na varredura }
+
+
+var
+  { --- Valores das medias --- }
+  vM1          : Float;           { media rapida M1 - valor atual }
+  vM2          : Float;           { media lenta  M2 - valor atual }
+  vM1_ant      : Float;           { M1 da vela anterior (ja fechada) }
+  vM2_ant      : Float;           { M2 da vela anterior (ja fechada) }
+  vM1_ant2     : Float;           { M1 de duas velas atras (ja fechada) }
+  vM2_ant2     : Float;           { M2 de duas velas atras (ja fechada) }
+
+  { --- Dados da vela anterior --- }
+  vOpen1       : Float;
+  vHigh1       : Float;
+  vLow1        : Float;
+  vClose1      : Float;
+
+  { --- Sinais principais --- }
+  bSinalCompra  : Boolean;
+  bSinalVenda   : Boolean;
+  bVelaAntAlta  : Boolean;
+  bVelaAntBaixa : Boolean;
+
+  { --- Cruzamento (para faixa de consolidacao) --- }
+  bCruzouParaCima  : Boolean;
+  bCruzouParaBaixo : Boolean;
+  bCruzDetectado   : Boolean;
+
+  { --- Gatilho armado --- }
+  bArmCompra     : Boolean;
+  bArmVenda      : Boolean;
+  vGatilhoCompra : Float;
+  vGatilhoVenda  : Float;
+
+  { --- Faixa de consolidacao --- }
+  vPrecoCruzAtual    : Float;
+  vPrecoCruzAnt      : Float;
+  bTemCruzAnterior   : Boolean;
+  vTopoFaixa         : Float;
+  vFundoFaixa        : Float;
+  bEmConsolidacao    : Boolean;
+  nBarraPrimCruz     : Integer;   { numero da barra do 1o cruzamento (CurrentBar) }
+  nDeslocPrimCruz    : Integer;   { quantas velas atras esta o 1o cruzamento }
+  nDeslocInicioJanela: Integer;   { quantas velas atras inicia a janela de varredura }
+  nIdx               : Integer;   { contador do loop de varredura }
+  vTopoVarredura     : Float;     { maior maxima encontrada na varredura }
+  vFundoVarredura    : Float;     { menor minima encontrada na varredura }
+  vMaxVela           : Float;     { maxima da vela analisada no loop }
+  vMinVela           : Float;     { minima da vela analisada no loop }
+  vDistCruz          : Float;     { distancia entre os dois ultimos cruzamentos (auxiliar para log) }
+  bCruzRegistrado    : Boolean;   { trava: indica que o cruzamento ja foi registrado nesta vela }
+
+  { --- Posicao e gestao --- }
+  vEntrada     : Float;
+  vStopAtual   : Float;
+  vAlvoAtual   : Float;
+  vLucroAberto : Float;
+
+  { --- Breakeven --- }
+  bBEAcionado  : Boolean;
+  vNivelBE     : Float;
+  nStepsBE     : Integer;
+
+  { --- Trailing stop --- }
+  bTrailingAcionado : Boolean;
+
+  { --- Controle de barra --- }
+  nUltimaBarra : Integer;
+  bNovaBarra   : Boolean;
+
+  { --- Controle de saida --- }
+  nBarraSaida  : Integer;
+  bTinhaPos    : Boolean;
+
+  { --- Reversao --- }
+  bReversao      : Boolean;
+  nBarraReversao : Integer;
+
+  { --- Controle diario e horario --- }
+  nData         : Integer;
+  nHoraAtual    : Integer;
+  bHoraOK       : Boolean;
+  bLockDiario   : Boolean;
+  vResultadoDia : Float;
+
+
+begin
+
+  { ================================================================ }
+  { 1. RESET NO PRIMEIRO CANDLE                                      }
+  { ================================================================ }
+  if (CurrentBar = 1) then
+  begin
+    nData             := Date;
+    nUltimaBarra      := CurrentBar;
+    bNovaBarra        := False;
+    bLockDiario       := False;
+    bArmCompra        := False;
+    bArmVenda         := False;
+    bEmConsolidacao   := False;
+    bTemCruzAnterior  := False;
+    bBEAcionado       := False;
+    bTrailingAcionado := False;
+    vResultadoDia     := 0;
+    vTopoFaixa        := 0;
+    vFundoFaixa       := 0;
+    nBarraSaida       := 0;
+    bTinhaPos         := False;
+    bReversao         := False;
+    nBarraReversao    := 0;
+    nBarraPrimCruz    := 0;
+    bCruzRegistrado   := False;
+  end;
+
+
+  { ================================================================ }
+  { 2. DETECCAO DE NOVA BARRA E NOVO DIA                             }
+  { ================================================================ }
+  bNovaBarra   := (CurrentBar <> nUltimaBarra);
+  nUltimaBarra := CurrentBar;
+
+  if (Date <> nData) then
+  begin
+    nData            := Date;
+    bLockDiario      := False;
+    vResultadoDia    := 0;
+    bArmCompra       := False;
+    bArmVenda        := False;
+    bEmConsolidacao  := False;
+    bTemCruzAnterior := False;
+    bReversao        := False;
+    bCruzRegistrado  := False;
+    CancelPendingOrders;
+  end;
+
+  if (bNovaBarra) then
+  begin
+    bReversao       := False;
+    bCruzRegistrado := False;
+  end;
+
+
+  { ================================================================ }
+  { 3. CONTROLE DE HORARIO                                           }
+  { ================================================================ }
+  nHoraAtual := Time;
+  bHoraOK    := (nHoraAtual >= pHoraInicio) and (nHoraAtual <= pHoraFim);
+
+
+  { ================================================================ }
+  { 4. GESTAO DIARIA                                                 }
+  { ================================================================ }
+  vResultadoDia := DailyResult(True);
+  if (vResultadoDia >= pMetaDiariaPts) or (vResultadoDia <= -pLossMaxDiarioPts) then
+    bLockDiario := True;
+
+
+  { ================================================================ }
+  { 5. CALCULO DAS MEDIAS                                            }
+  { ================================================================ }
+  vM1      := Media(pPeriodoM1, Close);
+  vM2      := Media(pPeriodoM2, Close);
+  vM1_ant  := Media(pPeriodoM1, Close)[1];
+  vM2_ant  := Media(pPeriodoM2, Close)[1];
+  vM1_ant2 := Media(pPeriodoM1, Close)[2];
+  vM2_ant2 := Media(pPeriodoM2, Close)[2];
+
+
+  { ================================================================ }
+  { 6. PLOTAGEM DAS MEDIAS                                           }
+  { ================================================================ }
+  Plot(vM1);
+  Plot2(vM2);
+
+
+  { ================================================================ }
+  { 7. LEITURA DE DADOS DA VELA ANTERIOR (somente em nova barra)     }
+  { ================================================================ }
+  if (bNovaBarra) then
+  begin
+    vOpen1  := Open[1];
+    vHigh1  := High[1];
+    vLow1   := Low[1];
+    vClose1 := Close[1];
+  end;
+
+
+  { ================================================================ }
+  { 8. SINAIS DAS MEDIAS E VELA ANTERIOR                             }
+  { ================================================================ }
+  { Sinal de viés: usa as medias atuais (recalculadas a cada tick).   }
+  { Cruzamento: usa medias de velas ja fechadas (vela 1 vs vela 2).   }
+  { Isso evita falsos cruzamentos intra-vela e garante que cada       }
+  { cruzamento detectado seja real e definitivo.                      }
+  { ================================================================ }
+  bSinalCompra  := (vM1 > vM2);
+  bSinalVenda   := (vM1 < vM2);
+  bVelaAntAlta  := (vClose1 > vOpen1);
+  bVelaAntBaixa := (vClose1 < vOpen1);
+
+  bCruzouParaCima  := (vM1_ant2 <= vM2_ant2) and (vM1_ant > vM2_ant);
+  bCruzouParaBaixo := (vM1_ant2 >= vM2_ant2) and (vM1_ant < vM2_ant);
+  bCruzDetectado   := bCruzouParaCima or bCruzouParaBaixo;
+
+  { --- LOG DE DIAGNOSTICO: mostra valores das medias a cada nova vela --- }
+  if (bNovaBarra) then
+  begin
+    ConsoleLog("BG11: --- Nova vela ---");
+    ConsoleLog("BG11: M1_vela1 = " + vM1_ant);
+    ConsoleLog("BG11: M2_vela1 = " + vM2_ant);
+    ConsoleLog("BG11: M1_vela2 = " + vM1_ant2);
+    ConsoleLog("BG11: M2_vela2 = " + vM2_ant2);
+    if (bCruzDetectado) then
+      ConsoleLog("BG11: >>> bCruzDetectado = TRUE")
+    else
+      ConsoleLog("BG11: bCruzDetectado = FALSE");
+  end;
+
+
+  { ================================================================ }
+  { 9. FAIXA DE CONSOLIDACAO                                         }
+  { ================================================================ }
+  { Quando o segundo cruzamento e detectado e esta proximo do        }
+  { primeiro, varre desde "pVelasAntesPrimCruz" velas anteriores ao  }
+  { primeiro cruzamento ate a vela do segundo cruzamento, registrando}
+  { a maior maxima (topo) e a menor minima (fundo) ao longo da janela}
+  {                                                                   }
+  { IMPORTANTE: a deteccao roda SOMENTE em nova barra. As medias     }
+  { usadas na comparacao sao das velas ja fechadas (vela 1 vs vela 2)}
+  { para evitar falsos cruzamentos intra-vela.                       }
+  {                                                                   }
+  { REGRAS DE MEMORIA:                                                }
+  { - Distancia > pDistMaxCruz -> apaga memoria (esquece referencia) }
+  { - Distancia <= pDistMaxCruz -> forma faixa                       }
+  { - Durante faixa ativa: cruzamentos continuam sendo registrados  }
+  {   na memoria (sobrescrevem a referencia), mas nao formam nova    }
+  {   faixa nem afetam a faixa atual.                                 }
+  { ================================================================ }
+  if (bNovaBarra) and (bCruzDetectado) then
+  begin
+    ConsoleLog("BG11: CRUZAMENTO_DETECTADO");
+
+    { Preco de referencia = ponto medio entre M1 e M2 no fechamento    }
+    { da vela do cruzamento. Como as medias acabaram de cruzar, esse  }
+    { ponto representa bem o "local visual" onde o cruzamento ocorreu.}
+    vPrecoCruzAtual := (vM1_ant + vM2_ant) / 2;
+
+    if (bTemCruzAnterior) then
+    begin
+      vDistCruz := Abs(vPrecoCruzAtual - vPrecoCruzAnt);
+      ConsoleLog("BG11: Preco cruzamento anterior = " + vPrecoCruzAnt);
+      ConsoleLog("BG11: Preco cruzamento atual = " + vPrecoCruzAtual);
+      ConsoleLog("BG11: SEGUNDO_CRUZAMENTO - distancia entre cruzamentos = " + vDistCruz);
+      ConsoleLog("BG11: Limite maximo (pDistMaxCruz) = " + pDistMaxCruz);
+
+      if (vDistCruz <= pDistMaxCruz) then
+      begin
+        { So forma nova faixa se nao houver uma faixa ativa. }
+        { Se ja houver faixa ativa, o cruzamento e apenas    }
+        { registrado na memoria (feito mais abaixo), sem     }
+        { alterar a faixa atual.                             }
+        if (not bEmConsolidacao) then
+        begin
+          { Vela "dona" do 2o cruzamento = vela anterior (CurrentBar - 1) }
+          { Deslocamento (em barras) do 1o cruzamento ate a vela atual    }
+          nDeslocPrimCruz := (CurrentBar - 1) - nBarraPrimCruz;
+
+          { Inicio da janela: pVelasAntesPrimCruz velas antes do 1o cruzamento }
+          nDeslocInicioJanela := nDeslocPrimCruz + pVelasAntesPrimCruz + 1;
+
+          { Se nao ha historico suficiente, limita ao numero de barras disponiveis }
+          if (nDeslocInicioJanela > (CurrentBar - 1)) then
+            nDeslocInicioJanela := CurrentBar - 1;
+
+          { Inicializa topo e fundo com a vela do 2o cruzamento (vela anterior) }
+          vTopoVarredura  := vHigh1;
+          vFundoVarredura := vLow1;
+
+          { Varre desde a vela mais antiga da janela ate a vela do 2o cruzamento }
+          { (deslocamento 1, ou seja, a vela anterior ja fechada)                }
+          for nIdx := nDeslocInicioJanela DownTo 1 do
+          begin
+            vMaxVela := High[nIdx];
+            vMinVela := Low[nIdx];
+
+            if (vMaxVela > vTopoVarredura) then
+              vTopoVarredura := vMaxVela;
+
+            if (vMinVela < vFundoVarredura) then
+              vFundoVarredura := vMinVela;
+          end;
+
+          vTopoFaixa  := vTopoVarredura;
+          vFundoFaixa := vFundoVarredura;
+
+          bEmConsolidacao := True;
+          ConsoleLog("BG11: Consolidacao on - Faixa de consolidacao detectada");
+          ConsoleLog("BG11: Topo da consolidacao = " + vTopoFaixa);
+          ConsoleLog("BG11: Fundo da consolidacao = " + vFundoFaixa);
+
+          bArmCompra := False;
+          bArmVenda  := False;
+          if (not HasPosition) then
+            CancelPendingOrders;
+        end;
+      end
+      else
+      begin
+        { Distancia maior que o limite: descarta o cruzamento antigo. }
+        { O cruzamento ATUAL vira a nova referencia - sera comparado  }
+        { com o proximo cruzamento que chegar.                         }
+        ConsoleLog("BG11: Distancia maior que limite - cruzamento antigo descartado");
+      end;
+    end;
+
+    { Registra dados deste cruzamento como referencia para o proximo. }
+    { Isto acontece sempre que ha cruzamento detectado em nova barra, }
+    { independente de ter havido cruzamento anterior ou nao, e        }
+    { independente da faixa estar ativa.                               }
+    if (not bTemCruzAnterior) then
+    begin
+      vPrecoCruzAnt    := vPrecoCruzAtual;
+      bTemCruzAnterior := True;
+      nBarraPrimCruz   := CurrentBar - 1;
+      ConsoleLog("BG11: PRIMEIRO_CRUZAMENTO - referencia gravada");
+    end
+    else
+    begin
+      vPrecoCruzAnt  := vPrecoCruzAtual;
+      nBarraPrimCruz := CurrentBar - 1;
+      ConsoleLog("BG11: Referencia atualizada com este cruzamento");
+    end;
+  end;
+
+  if (bEmConsolidacao) then
+  begin
+    if (Close > (vTopoFaixa + pDistSaidaFaixa)) or
+       (Close < (vFundoFaixa - pDistSaidaFaixa)) then
+    begin
+      ConsoleLog("BG11: Consolidacao off - Faixa desfeita, EA liberado para operacao");
+      bEmConsolidacao := False;
+    end;
+  end;
+
+
+  { ================================================================ }
+  { 10. DETECTAR SAIDA E BLOQUEAR REENTRADA NO MESMO CANDLE          }
+  { ================================================================ }
+  if (bTinhaPos) and (not HasPosition) then
+    nBarraSaida := CurrentBar;
+
+  bTinhaPos := HasPosition;
+
+
+  { ================================================================ }
+  { 11. REVERSAO POR INVERSAO DAS MEDIAS                             }
+  { ================================================================ }
+  if (IsBought) and (bSinalVenda) then
+  begin
+    ConsoleLog("BG11: REVERSAO - fechando compra: M1 virou abaixo de M2");
+    ClosePosition;
+    CancelPendingOrders;
+    bReversao      := True;
+    nBarraReversao := CurrentBar;
+    bArmCompra     := False;
+  end;
+
+  if (IsSold) and (bSinalCompra) then
+  begin
+    ConsoleLog("BG11: REVERSAO - fechando venda: M1 virou acima de M2");
+    ClosePosition;
+    CancelPendingOrders;
+    bReversao      := True;
+    nBarraReversao := CurrentBar;
+    bArmVenda      := False;
+  end;
+
+
+  { ================================================================ }
+  { 12. SAIDAS DA POSICAO ABERTA                                     }
+  { ================================================================ }
+
+  if (HasPosition) and (nHoraAtual >= pHoraFim) then
+  begin
+    ClosePosition;
+    CancelPendingOrders;
+  end;
+
+  if (HasPosition) and (bLockDiario) then
+  begin
+    ClosePosition;
+    CancelPendingOrders;
+  end;
+
+
+  { ================================================================ }
+  { 13. GERENCIAMENTO DA POSICAO: STOP, ALVO, BREAKEVEN, TRAILING    }
+  { ================================================================ }
+
+  if (IsBought) then
+  begin
+    vEntrada     := BuyPrice;
+    vLucroAberto := Close - vEntrada;
+
+    if (pUsarBreakeven) then
+    begin
+      if (not bBEAcionado) then
+      begin
+        if (vLucroAberto >= pDistAcionaBE) then
+        begin
+          bBEAcionado := True;
+          nStepsBE    := 1;
+          vNivelBE    := vEntrada + pStepBreakevenPts;
+          vStopAtual  := vNivelBE;
+        end
+        else
+          vStopAtual := vEntrada - pStopFixoPts;
+      end
+      else
+      begin
+        if (vLucroAberto >= (pDistAcionaBE + (nStepsBE * pStepBreakevenPts))) then
+        begin
+          nStepsBE   := nStepsBE + 1;
+          vNivelBE   := vEntrada + (nStepsBE * pStepBreakevenPts);
+          vStopAtual := vNivelBE;
+        end;
+      end;
+    end
+    else
+      vStopAtual := vEntrada - pStopFixoPts;
+
+    if (pUsarTrailing) then
+    begin
+      if (not bTrailingAcionado) then
+      begin
+        if (vLucroAberto >= pDistAcionaTrailing) then
+          bTrailingAcionado := True;
+      end;
+
+      if (bTrailingAcionado) and (bNovaBarra) then
+      begin
+        if ((vLow1 - pOffsetEntrada) > vStopAtual) then
+          vStopAtual := vLow1 - pOffsetEntrada;
+      end;
+    end;
+
+    vAlvoAtual := vEntrada + pAlvoFixoPts;
+    SellToCoverStop(vStopAtual, vStopAtual);
+    SellToCoverLimit(vAlvoAtual);
+  end;
+
+  if (IsSold) then
+  begin
+    vEntrada     := SellPrice;
+    vLucroAberto := vEntrada - Close;
+
+    if (pUsarBreakeven) then
+    begin
+      if (not bBEAcionado) then
+      begin
+        if (vLucroAberto >= pDistAcionaBE) then
+        begin
+          bBEAcionado := True;
+          nStepsBE    := 1;
+          vNivelBE    := vEntrada - pStepBreakevenPts;
+          vStopAtual  := vNivelBE;
+        end
+        else
+          vStopAtual := vEntrada + pStopFixoPts;
+      end
+      else
+      begin
+        if (vLucroAberto >= (pDistAcionaBE + (nStepsBE * pStepBreakevenPts))) then
+        begin
+          nStepsBE   := nStepsBE + 1;
+          vNivelBE   := vEntrada - (nStepsBE * pStepBreakevenPts);
+          vStopAtual := vNivelBE;
+        end;
+      end;
+    end
+    else
+      vStopAtual := vEntrada + pStopFixoPts;
+
+    if (pUsarTrailing) then
+    begin
+      if (not bTrailingAcionado) then
+      begin
+        if (vLucroAberto >= pDistAcionaTrailing) then
+          bTrailingAcionado := True;
+      end;
+
+      if (bTrailingAcionado) and (bNovaBarra) then
+      begin
+        if ((vHigh1 + pOffsetEntrada) < vStopAtual) then
+          vStopAtual := vHigh1 + pOffsetEntrada;
+      end;
+    end;
+
+    vAlvoAtual := vEntrada - pAlvoFixoPts;
+    BuyToCoverStop(vStopAtual, vStopAtual);
+    BuyToCoverLimit(vAlvoAtual);
+  end;
+
+  if (not HasPosition) then
+  begin
+    bBEAcionado       := False;
+    bTrailingAcionado := False;
+    nStepsBE          := 0;
+  end;
+
+
+  { ================================================================ }
+  { 14. ARMAR GATILHOS DE ENTRADA (somente em nova barra)            }
+  { ================================================================ }
+  if (bNovaBarra) and (not HasPosition) and (bHoraOK) and (not bLockDiario)
+     and (not bEmConsolidacao) and (CurrentBar <> nBarraSaida)
+     and (CurrentBar <> nBarraReversao) then
+  begin
+
+    if (bSinalCompra) and (bVelaAntAlta) then
+    begin
+      bArmCompra     := True;
+      bArmVenda      := False;
+      vGatilhoCompra := vHigh1 + pOffsetEntrada;
+    end;
+
+    if (bSinalVenda) and (bVelaAntBaixa) then
+    begin
+      bArmVenda      := True;
+      bArmCompra     := False;
+      vGatilhoVenda  := vLow1 - pOffsetEntrada;
+    end;
+
+    if (bArmCompra) and (not bSinalCompra) then
+      bArmCompra := False;
+
+    if (bArmVenda) and (not bSinalVenda) then
+      bArmVenda := False;
+
+  end;
+
+  if (bEmConsolidacao) then
+  begin
+    bArmCompra := False;
+    bArmVenda  := False;
+  end;
+
+
+  { ================================================================ }
+  { 15. ENVIO DE ORDENS DE ENTRADA (a cada tick)                     }
+  { ================================================================ }
+  if (not HasPosition) and (bHoraOK) and (not bLockDiario) and (not bEmConsolidacao)
+     and (CurrentBar <> nBarraSaida) and (CurrentBar <> nBarraReversao) then
+  begin
+
+    if (bArmCompra) then
+      BuyStop(vGatilhoCompra, vGatilhoCompra, pQtdContratos)
+
+    else if (bArmVenda) then
+      SellShortStop(vGatilhoVenda, vGatilhoVenda, pQtdContratos);
+
+  end;
+
+
+  { ================================================================ }
+  { 16. RESETAR GATILHO APOS ENTRADA EXECUTADA                       }
+  { ================================================================ }
+  if (IsBought) then
+    bArmCompra := False;
+
+  if (IsSold) then
+    bArmVenda := False;
+
+
+  { ================================================================ }
+  { 17. CANCELAR ORDENS PENDENTES QUANDO NAO HA POSICAO E SEM SETUP  }
+  { ================================================================ }
+  if (not HasPosition) and (not bArmCompra) and (not bArmVenda) then
+    CancelPendingOrders;
+
+
+  { ================================================================ }
+  { 18. PLOTAGEM DA FAIXA DE CONSOLIDACAO                            }
+  { ================================================================ }
+  if (bEmConsolidacao) then
+  begin
+    Plot3(vTopoFaixa);
+    Plot4(vFundoFaixa);
+  end;
+
+
+  { ================================================================ }
+  { 19. SINALIZACAO VISUAL                                           }
+  { ================================================================ }
+  if (IsBought) then
+    PaintBar(clVerde)
+  else if (IsSold) then
+    PaintBar(clVermelho);
+
+  if (bArmCompra) and (not HasPosition) then
+    PlotText("BUY", clVerde, 0, 7);
+
+  if (bArmVenda) and (not HasPosition) then
+    PlotText("SELL", clVermelho, 2, 7);
+
+  if (bEmConsolidacao) and (not HasPosition) then
+    PaintBar(clAmarelo);
+
+
+end;
