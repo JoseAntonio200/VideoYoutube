@@ -1,0 +1,1270 @@
+{ ================================================================== }
+{ EA: BoldGlad-CML                                                  }
+{ ================================================================== }
+{ Robo de execucao NTSL para ProfitUltra - Tick a Tick              }
+{                                                                    }
+{ Variante do BoldGlad-CM com tres mudancas para reduzir perdas em  }
+{ dias de tendencia e cortar o overtrading:                          }
+{  1. FILTRO DE TENDENCIA: media lenta direcional (default 50). So  }
+{     libera compra acima dela e venda abaixo. Em dia de queda, o   }
+{     EA para de comprar contra a tendencia.                         }
+{  2. MENOS ENTRADAS: gatilhos de antecipacao (inclinacao e padrao  }
+{     de 3 velas) vem DESLIGADOS por padrao + pausa de N velas      }
+{     apos cada saida de posicao (pVelasPausaAposSaida).             }
+{  3. TRAVA-DIA A PROVA DE REINICIO: por padrao o contador de perda }
+{     do dia NAO zera ao reabilitar o EA no meio do pregao           }
+{     (pResetarPlacarAoReiniciar = False).                           }
+{                                                                    }
+{ Entrada por gatilho STOP no rompimento da maxima/minima da vela   }
+{ anterior + offset.                                                 }
+{ M1 = media aritmetica rapida (default 5 periodos)                 }
+{ M2 = media aritmetica lenta  (default 9 periodos)                 }
+{                                                                    }
+{ Compra: M1 > M2 + vela anterior positiva + rompimento Hi+offset   }
+{         + Close acima da media de tendencia.                       }
+{ Venda:  M1 < M2 + vela anterior negativa + rompimento Lo-offset   }
+{         + Close abaixo da media de tendencia.                      }
+{                                                                    }
+{ Rearme continuo: enquanto o vies se mantiver, a cada nova vela   }
+{ o gatilho stop e recalculado para Hi/Lo da ultima vela fechada.   }
+{                                                                    }
+{ NAO HA REVERSAO. Se um cruzamento contrario ocorrer estando em    }
+{ posicao, a posicao continua aberta sob a gestao normal de stop,  }
+{ alvo, breakeven, trailing, horario e lock diario.                  }
+{                                                                    }
+{ Faixa de consolidacao: formada quando dois cruzamentos consecutivos}
+{ de M1 e M2 estao a uma distancia <= pDistMaxCruz. Topo e fundo    }
+{ da faixa via varredura das N velas anteriores ao 1o cruzamento    }
+{ ate a vela do 2o cruzamento. EA nao opera durante a faixa. Ao     }
+{ desfazer, o EA volta a operar normalmente e aguarda o proximo    }
+{ rompimento.                                                       }
+{                                                                    }
+{ Gerenciamento: stop fixo, alvo fixo, breakeven gradual (opcional),}
+{ trailing stop na minima/maxima do candle anterior (opcional).     }
+{ ================================================================== }
+
+
+input
+  { --- Medias moveis --- }
+  pPeriodoM1(5);                  { periodo da media rapida M1 }
+  pPeriodoM2(9);                  { periodo da media lenta M2  }
+
+  { --- Filtro de tendencia dominante (BoldGlad-CML) --- }
+  pUsarFiltroTendencia(True);     { liga/desliga o filtro direcional. Quando ligado, so libera compra com Close acima da media de tendencia e venda com Close abaixo. Evita operar contra a tendencia do dia. }
+  pPeriodoTendencia(50.0);        { periodo da media de tendencia (mais lenta que M1/M2). Maior = filtro mais lento e robusto; menor = mais sensivel. }
+
+  { --- Inclinacao da media rapida (gatilho antecipatorio de vies) --- }
+  { ATENCAO (CML): default mudado para False para reduzir o flip-flop  }
+  { de vies em dias de tendencia com ruido. Ligue para reativar.        }
+  pInclinacaoMediaRapida(False);       { liga/desliga o gatilho de antecipacao de vies via inclinacao forte da M1 }
+  pValorInclinacaoMediaRapida(0.04);   { percentual do preco (Close) - se Abs(M1[1] - M1[2]) > Close * pct / 100, ativa o vies antecipado (sinal de venda se M1 caindo, compra se subindo). Em conflito com M1>M2 / M1<M2, a inclinacao ganha. }
+
+  { --- Padrao de 3 velas (gatilho alternativo de vies) --- }
+  { ATENCAO (CML): default mudado para False (mesmo motivo da inclinacao).}
+  pTradeVela3(False);                  { liga/desliga o gatilho por padrao de 3 velas. Compra: vela 3 negativa ou doji + vela 2 positiva + vela 1 positiva; gatilho na maxima da vela 1 + offset. Venda: espelhado (vela 3 positiva ou doji). Em conflito com M1 vs M2, o padrao V3 ganha; em conflito com inclinacao forte, a inclinacao ganha. }
+
+  { --- Trailing - offset --- }
+  pOffsetEntrada(5.0);            { deslocamento em pts aplicado ao trailing da minima/maxima }
+
+  { --- Stop e alvo --- }
+  pStopFixoPts(150.0);            { stop loss fixo em pontos }
+  pAlvoFixoPts(500.0);            { take profit fixo em pontos }
+
+  { --- Breakeven --- }
+  pUsarBreakeven(True);           { ativar aproximacao gradual do stop em direcao ao breakeven }
+  pStepBreakevenPts(50.0);        { a cada X pts de avanco a favor, o stop se aproxima X pts do BE }
+
+  { --- Trailing stop --- }
+  pUsarTrailing(True);            { ativar trailing stop }
+  pDistAcionaTrailing(150.0);     { pts a favor para acionar trailing stop }
+
+  { --- Quantidade --- }
+  pQtdContratos(10.0);            { quantidade inicial de contratos }
+
+  { --- Pausa apos saida (BoldGlad-CML) --- }
+  pVelasPausaAposSaida(3);        { numero de velas de pausa apos QUALQUER saida de posicao antes de armar nova entrada. Corta o rearme em sequencia (overtrading). Use 1 para reproduzir o comportamento antigo (bloqueia so a vela da saida). NAO se aplica a reentrada apos lucro (P2), que fura a pausa. }
+
+  { --- Entrada de abertura (P1 - BoldGlad-CML) --- }
+  pTradeAbertura(True);           { liga/desliga a entrada de abertura. Definida a 1a vela do pregao (09:00), entra A MERCADO no rompimento do fundo (vendido) ou do topo (comprado) dela. Dispara no maximo uma vez por dia e so a favor da media de tendencia (filtro de 50). }
+
+  { --- Reentrada apos lucro (P2 - BoldGlad-CML) --- }
+  pReentradaAposLucro(True);      { liga/desliga a reentrada apos trade vencedor. Ao fechar um trade no lucro (qualquer resultado > 0), arma uma nova entrada na MESMA direcao no rompimento da vela que acabou de fechar. Fura a pausa pos-saida. Exige vies (M1xM2) E media de 50 a favor. Encadeia enquanto vencer; perde -> volta a logica normal. }
+
+  { --- Horario --- }
+  pHoraInicio(0900);              { horario de inicio (HHMM) - 0900 para a regra de abertura (P1) valer desde a 1a vela do pregao }
+  pHoraFim(1730);                 { horario de termino (HHMM) }
+
+  { --- Gestao diaria --- }
+  pMetaDiariaPts(2000.0);         { ganho maximo no dia em pontos - so bloqueia se o trailing (vLucroAcumRef) ainda nao foi armado }
+  pLossMaxDiarioPts(1000.0);      { perda maxima no dia em pontos }
+  pValorPontoRS(0.20);            { valor financeiro de 1 ponto do ativo (R$ 0,20 = WIN) }
+  pLucroRef(1100.0);              { ponto de armamento do trailing de protecao do lucro - quando vResultadoDia atinge esse valor, o trailing arma; depois, se vResultadoDia cair para 70% do pico (vLucroAcumRef), ou seja perda de 30% do pico, o EA bloqueia o dia }
+  pResetarPlacarAoReiniciar(False); { (BoldGlad-CML) se True, ao reabilitar o EA no meio do dia ele zera o contador de perda/lucro do dia (baseline) - comportamento antigo do CM. Se False (default), o limite de perda diaria vale para o DIA INTEIRO mesmo apos reinicios - a trava nao e desarmada ao religar o EA. }
+
+  { --- Faixa de consolidacao --- }
+  pDistMaxCruz(50.0);             { distancia maxima entre dois cruzamentos para formar faixa }
+  pBufferFaixa(100.0);            { acrescimo ao topo e decrescimo ao fundo da faixa apos varredura }
+  pDistSaidaFaixa(50.0);          { distancia adicional para o preco se afastar da faixa e liberar operacao }
+  pVelasAntesPrimCruz(5);         { qtde de velas anteriores ao 1o cruzamento incluidas na varredura }
+  pPercProximidadeMedias(0.005);  { percentual do preco (Close) - se Abs(M1-M2) <= Close*pct/100, gera evento equivalente a um cruzamento (dispara mesma logica da faixa) }
+
+
+var
+  { --- Valores das medias --- }
+  vM1          : Float;           { media rapida M1 - valor atual }
+  vM2          : Float;           { media lenta  M2 - valor atual }
+  vM1_ant      : Float;           { M1 da vela anterior (ja fechada) }
+  vM2_ant      : Float;           { M2 da vela anterior (ja fechada) }
+  vM1_ant2     : Float;           { M1 de duas velas atras (ja fechada) }
+  vM2_ant2     : Float;           { M2 de duas velas atras (ja fechada) }
+
+  { --- Filtro de tendencia dominante (BoldGlad-CML) --- }
+  vMediaTendencia  : Float;       { media lenta de tendencia (pPeriodoTendencia) }
+  bTendenciaCompra : Boolean;     { True se filtro desligado OU Close > vMediaTendencia }
+  bTendenciaVenda  : Boolean;     { True se filtro desligado OU Close < vMediaTendencia }
+
+  { --- Entrada de abertura (P1 - BoldGlad-CML) --- }
+  vAberturaHigh       : Float;    { topo da 1a vela do pregao }
+  vAberturaLow        : Float;    { fundo da 1a vela do pregao }
+  bAguardandoPrimVela : Boolean;  { True desde a virada do dia ate a 1a vela do pregao fechar }
+  bAberturaArmada     : Boolean;  { True quando o range da 1a vela ja foi capturado (vigia o rompimento) }
+  bAberturaUsada      : Boolean;  { True apos a entrada de abertura disparar - garante uma vez por dia }
+  nBarraPrimVelaDia   : Integer;  { CurrentBar da 1a vela do pregao }
+
+  { --- Reentrada apos lucro (P2 - BoldGlad-CML) --- }
+  nDirecaoPos         : Integer;  { direcao da posicao atual/ultima: +1 comprado, -1 vendido, 0 nenhuma }
+  vUltimoLucroAberto  : Float;    { lucro aberto (em pts) no ultimo tick com posicao - usado para saber se o trade fechou no lucro }
+  bReentradaArmada    : Boolean;  { True quando o ultimo trade fechou no lucro e a reentrada na mesma direcao esta ativa }
+  nDirecaoReentrada   : Integer;  { direcao da reentrada armada: +1 compra, -1 venda }
+  bEntradaEnviadaNoTick : Boolean;{ True se a abertura (P1) ja enviou ordem neste tick - evita envio duplo no mesmo tick }
+
+  { --- Dados da vela anterior (usados em rompimento, faixa e trailing) --- }
+  vOpen1       : Float;
+  vHigh1       : Float;
+  vLow1        : Float;
+  vClose1      : Float;
+
+  { --- Sinais principais --- }
+  bSinalCompra  : Boolean;        { vies de compra: M1 > M2 (atualizado tick a tick) }
+  bSinalVenda   : Boolean;        { vies de venda:  M1 < M2 (atualizado tick a tick) }
+  bVelaAntAlta  : Boolean;        { True se a vela 1 fechou positiva (Close1 > Open1) }
+  bVelaAntBaixa : Boolean;        { True se a vela 1 fechou negativa (Close1 < Open1) }
+
+  { --- Cruzamento (detectado no fechamento da vela) --- }
+  bCruzouParaCima  : Boolean;     { M1 cruzou acima de M2 entre vela 2 e vela 1 (so para faixa) }
+  bCruzouParaBaixo : Boolean;     { M1 cruzou abaixo de M2 entre vela 2 e vela 1 (so para faixa) }
+  bCruzDetectado   : Boolean;     { qualquer evento equivalente a cruzamento (real ou proximidade das medias) }
+
+  { --- Proximidade das medias (gera evento sintetico equivalente a cruzamento) --- }
+  vLimiteProximidade : Float;     { Close * pPercProximidadeMedias / 100 - magnitude limite para considerar M1 e M2 "proximas" }
+  bMediasProximas    : Boolean;   { True se Abs(M1 ant - M2 ant) <= vLimiteProximidade (vela 1 fechada do mesmo dia) }
+
+  { --- Inclinacao da M1 (antecipa vies sem esperar cruzamento real) --- }
+  vLimiteInclinacao  : Float;     { Close * pValorInclinacaoMediaRapida / 100 - magnitude limite em pontos para considerar inclinacao "forte" }
+  vInclinacaoM1      : Float;     { vM1_ant - vM1_ant2 - variacao da M1 entre vela 2 e vela 1, em pontos, com sinal }
+  bInclinacaoAlta    : Boolean;   { True se pInclinacaoMediaRapida e vInclinacaoM1 > vLimiteInclinacao (mesma defesa de data do cruzamento) - antecipa vies de compra }
+  bInclinacaoBaixa   : Boolean;   { True se pInclinacaoMediaRapida e vInclinacaoM1 < -vLimiteInclinacao (mesma defesa de data) - antecipa vies de venda }
+
+  { --- Padrao de 3 velas (gatilho alternativo de vies) --- }
+  bPadraoCompraV3    : Boolean;   { True se pTradeVela3 e vela 3 negativa ou doji + vela 2 positiva + vela 1 positiva (todas do mesmo dia) - antecipa vies de compra }
+  bPadraoVendaV3     : Boolean;   { True se pTradeVela3 e vela 3 positiva ou doji + vela 2 negativa + vela 1 negativa (todas do mesmo dia) - antecipa vies de venda }
+
+  { --- Gatilho stop armado --- }
+  bArmCompra     : Boolean;       { True quando ha gatilho stop de compra armado }
+  bArmVenda      : Boolean;       { True quando ha gatilho stop de venda armado }
+  vGatilhoCompra : Float;         { preco do gatilho de compra: vHigh1 + pOffsetEntrada }
+  vGatilhoVenda  : Float;         { preco do gatilho de venda:  vLow1  - pOffsetEntrada }
+  bLogEnvioCompra: Boolean;       { evita repetir log de envio do BuyStop a cada tick }
+  bLogEnvioVenda : Boolean;       { evita repetir log de envio do SellShortStop a cada tick }
+
+  { --- Fallback a mercado quando preco ja passou do gatilho --- }
+  bMarketComprouEnviado : Boolean; { True apos enviar BuyAtMarket numa nova barra - evita disparar mercado multiplas vezes por tick. Reseta a cada nova barra para dar nova chance se o anterior nao executou. }
+  bMarketVendeuEnviado  : Boolean; { True apos enviar SellShortAtMarket - mesma logica }
+
+  { --- Faixa de consolidacao --- }
+  vPrecoCruzAtual    : Float;
+  vPrecoCruzAnt      : Float;
+  bTemCruzAnterior   : Boolean;
+  nDataCruzAnt       : Integer;   { data (1AnoMesDia) do cruzamento gravado em memoria }
+  vTopoFaixa         : Float;
+  vFundoFaixa        : Float;
+  bEmConsolidacao    : Boolean;
+  nDataFaixa         : Integer;   { data (1AnoMesDia) em que a faixa atual foi formada }
+  nBarraPrimCruz     : Integer;   { numero da barra do 1o cruzamento (CurrentBar) }
+  nDeslocPrimCruz    : Integer;   { quantas velas atras esta o 1o cruzamento }
+  nDeslocInicioJanela: Integer;   { quantas velas atras inicia a janela de varredura }
+  nIdx               : Integer;   { contador do loop de varredura }
+  vTopoVarredura     : Float;     { maior maxima encontrada na varredura }
+  vFundoVarredura    : Float;     { menor minima encontrada na varredura }
+  vMaxVela           : Float;     { maxima da vela analisada no loop }
+  vMinVela           : Float;     { minima da vela analisada no loop }
+  vDistCruz          : Float;     { distancia entre os dois ultimos cruzamentos (auxiliar para log) }
+
+  { --- Posicao e gestao --- }
+  vEntrada     : Float;
+  vStopAtual   : Float;
+  vAlvoAtual   : Float;
+  vLucroAberto : Float;
+
+  { --- Breakeven --- }
+  vNivelBE     : Float;       { preco calculado para o stop apos aplicar os steps ja alcancados }
+  nStepsBE     : Integer;     { quantos steps ja foram efetivados no breakeven }
+  nMaxStepsBE  : Integer;     { numero maximo de steps ate o stop atingir o breakeven }
+
+  { --- Trailing stop --- }
+  bTrailingAcionado : Boolean;
+
+  { --- Quantidade da posicao --- }
+  vQtdPos           : Float;      { tamanho real da posicao no broker (modulo de PositionQty) - usado para a qty da OCO de protecao }
+
+  { --- Controle de barra --- }
+  nUltimaBarra : Integer;
+  bNovaBarra   : Boolean;
+
+  { --- Controle de saida --- }
+  nBarraSaida   : Integer;
+  bTinhaPos     : Boolean;
+  bEmPausaSaida : Boolean;        { (CML) True enquanto estiver na janela de pausa apos uma saida (pVelasPausaAposSaida) }
+
+  { --- Controle diario e horario --- }
+  nData              : Integer;
+  nHoraAtual         : Integer;
+  bHoraOK            : Boolean;
+  bLockDiario        : Boolean;
+  vResultadoDia      : Float;
+  vBaselineResultado : Float;        { resultado do dia capturado na hora que o EA entrou em tempo real - zera o placar apos reinicio }
+  bRTInicializado    : Boolean;      { indica se a captura do baseline ja aconteceu nesta execucao }
+
+  { --- Trailing de protecao do lucro acumulado --- }
+  vLucroAcumRef      : Float;        { pico do lucro acumulado do dia, em pontos - inicia em pLucroRef e sobe quando vResultadoDia > vLucroAcumRef ao fechar nova vela }
+  bLucroRefAtingido  : Boolean;      { True quando vResultadoDia atingiu pLucroRef pela primeira vez no dia - arma o trailing e desativa pMetaDiariaPts (opcao A do item 5) }
+
+
+begin
+
+  { ================================================================ }
+  { 1. RESET NO PRIMEIRO CANDLE                                      }
+  { ================================================================ }
+  if (CurrentBar = 1) then
+  begin
+    nData              := Date;
+    nUltimaBarra       := CurrentBar;
+    bNovaBarra         := False;
+    bLockDiario        := False;
+    bEmConsolidacao    := False;
+    bTemCruzAnterior   := False;
+    nDataCruzAnt       := 0;
+    nDataFaixa         := 0;
+    bTrailingAcionado  := False;
+    vResultadoDia      := 0;
+    vBaselineResultado := 0;
+    bRTInicializado    := False;
+    vLucroAcumRef      := 0;          { zera primeiro (item 6 do requisito) ... }
+    vLucroAcumRef      := pLucroRef;  { ... e em seguida carrega pLucroRef }
+    bLucroRefAtingido  := False;
+    bArmCompra         := False;
+    bArmVenda          := False;
+    bLogEnvioCompra    := False;
+    bLogEnvioVenda     := False;
+    bMarketComprouEnviado := False;
+    bMarketVendeuEnviado  := False;
+    vTopoFaixa         := 0;
+    vFundoFaixa        := 0;
+    nBarraSaida        := 0;
+    bTinhaPos          := False;
+    nBarraPrimCruz     := 0;
+    { Estado da abertura (P1) e reentrada (P2) }
+    bAguardandoPrimVela := True;
+    nBarraPrimVelaDia   := CurrentBar;
+    bAberturaArmada     := False;
+    bAberturaUsada      := False;
+    vAberturaHigh       := 0;
+    vAberturaLow        := 0;
+    nDirecaoPos         := 0;
+    vUltimoLucroAberto  := 0;
+    bReentradaArmada    := False;
+    nDirecaoReentrada   := 0;
+  end;
+
+
+  { ================================================================ }
+  { 2. DETECCAO DE NOVA BARRA E NOVO DIA                             }
+  { ================================================================ }
+  bNovaBarra   := (CurrentBar <> nUltimaBarra);
+  nUltimaBarra := CurrentBar;
+
+  if (Date <> nData) then
+  begin
+    nData              := Date;
+    bLockDiario        := False;
+    vResultadoDia      := 0;
+    vBaselineResultado := 0;
+    bEmConsolidacao    := False;
+    bTemCruzAnterior   := False;
+    bArmCompra         := False;
+    bArmVenda          := False;
+    bLogEnvioCompra    := False;
+    bLogEnvioVenda     := False;
+    bMarketComprouEnviado := False;
+    bMarketVendeuEnviado  := False;
+    vLucroAcumRef      := 0;          { zera primeiro (item 6 do requisito) ... }
+    vLucroAcumRef      := pLucroRef;  { ... e em seguida carrega pLucroRef }
+    bLucroRefAtingido  := False;
+    { Novo dia: re-arma a captura da 1a vela do pregao (P1) e limpa a   }
+    { cadeia de reentrada (P2).                                          }
+    bAguardandoPrimVela := True;
+    nBarraPrimVelaDia   := CurrentBar;
+    bAberturaArmada     := False;
+    bAberturaUsada      := False;
+    vAberturaHigh       := 0;
+    vAberturaLow        := 0;
+    bReentradaArmada    := False;
+    nDirecaoReentrada   := 0;
+    nDirecaoPos         := 0;
+    vUltimoLucroAberto  := 0;
+    CancelPendingOrders;
+  end;
+
+
+  { ================================================================ }
+  { 3. CONTROLE DE HORARIO                                           }
+  { ================================================================ }
+  nHoraAtual := Time;
+  bHoraOK    := (nHoraAtual >= pHoraInicio) and (nHoraAtual <= pHoraFim);
+
+
+  { ================================================================ }
+  { 4. GESTAO DIARIA                                                 }
+  { ================================================================ }
+  { Ao entrar em tempo real pela primeira vez nesta execucao, captura }
+  { o resultado atual como baseline e zera o lock. Isso faz o EA      }
+  { voltar a operar apos reinicio no meio do dia, mesmo que a meta ou }
+  { loss ja tenha sido atingida antes do reinicio. A contagem reinicia}
+  { do zero ate atingir novamente pMetaDiariaPts ou pLossMaxDiarioPts.}
+  { (BoldGlad-CML) Por padrao a trava diaria sobrevive a reinicios: ao }
+  { reabilitar o EA no meio do dia, o contador NAO e zerado, entao o   }
+  { limite de perda diaria vale para o dia inteiro. So zera o placar    }
+  { (baseline) se pResetarPlacarAoReiniciar = True (comportamento CM).  }
+  if (not bRTInicializado) and (LastBarOnChart) then
+  begin
+    if (pResetarPlacarAoReiniciar) then
+    begin
+      vBaselineResultado := DailyResult(True);
+      bLockDiario        := False;
+    end;
+    bRTInicializado    := True;
+
+    { A memoria de cruzamentos e a faixa de consolidacao nao sao       }
+    { zeradas aqui. A defesa contra dados de pregoes anteriores e por }
+    { DATA (secao 9). Assim, ao entrar em RT no meio do pregao, o EA }
+    { enxerga todos os cruzamentos do dia atual processados no        }
+    { historico e mantem a faixa em vigor se houver.                  }
+  end;
+
+  { DailyResult(True) retorna o resultado em VALOR FINANCEIRO (R$).   }
+  { Convertemos para PONTOS dividindo por (pValorPontoRS x qtd de    }
+  { contratos) para que a comparacao com pMetaDiariaPts e            }
+  { pLossMaxDiarioPts seja feita na mesma unidade (pontos).           }
+  vResultadoDia := (DailyResult(True) - vBaselineResultado) / (pValorPontoRS * pQtdContratos);
+
+  { Atualizacao do pico do lucro acumulado (item 3 do requisito): a   }
+  { cada fechamento de nova vela, se o lucro acumulado bateu novo    }
+  { recorde, registra o novo pico em vLucroAcumRef. Roda somente em  }
+  { bNovaBarra para evitar atualizar por flutuacoes intra-vela.       }
+  if (bNovaBarra) and (vResultadoDia > vLucroAcumRef) then
+    vLucroAcumRef := vResultadoDia;
+
+  { Armamento do trailing (item 2): quando vResultadoDia atinge      }
+  { pLucroRef pela primeira vez no dia, ativa a protecao trailing.   }
+  { A partir daqui pMetaDiariaPts deixa de bloquear (opcao A do item }
+  { 5) e o bloqueio passa a ser pelo trailing: se vResultadoDia cair }
+  { ate 70% do pico (vLucroAcumRef * 0.70), isto e, perda de 30% do }
+  { pico, encerra o dia.                                              }
+  if (not bLucroRefAtingido) and (vResultadoDia >= pLucroRef) then
+  begin
+    bLucroRefAtingido := True;
+    ConsoleLog("BG-CML: Lucro de referencia atingido - trailing armado @ " + Round(pLucroRef) + " pts - bloqueio se cair para " + Round(pLucroRef * 0.70) + " pts ou menos do pico");
+  end;
+
+  { Bloqueio diario - tres condicoes independentes (uma so dispara,  }
+  { pelo if/not bLockDiario na entrada de cada uma):                 }
+  { a) Loss diario: sempre ativo, independente do trailing.          }
+  { b) Trailing armado: bloqueia se vResultadoDia caiu para 70% do  }
+  {    pico (perda de 30% do pico). pMetaDiariaPts NAO bloqueia     }
+  {    nesse caso (opcao A do item 5 do requisito).                 }
+  { c) Trailing nao armado: pMetaDiariaPts bloqueia ao ser atingido.}
+  if (not bLockDiario) and (vResultadoDia <= -pLossMaxDiarioPts) then
+  begin
+    bLockDiario := True;
+    ConsoleLog("BG-CML: Lock diario - loss maximo diario atingido @ " + Round(vResultadoDia) + " pts (limite -" + Round(pLossMaxDiarioPts) + ")");
+  end;
+
+  if (not bLockDiario) and (bLucroRefAtingido) and (vResultadoDia <= (vLucroAcumRef * 0.70)) then
+  begin
+    bLockDiario := True;
+    ConsoleLog("BG-CML: Lock diario - lucro caiu para 70% do pico (perda de 30%) - pico " + Round(vLucroAcumRef) + " pts - atual " + Round(vResultadoDia) + " pts");
+  end;
+
+  if (not bLockDiario) and (not bLucroRefAtingido) and (vResultadoDia >= pMetaDiariaPts) then
+  begin
+    bLockDiario := True;
+    ConsoleLog("BG-CML: Lock diario - meta diaria atingida @ " + Round(vResultadoDia) + " pts (limite " + Round(pMetaDiariaPts) + ")");
+  end;
+
+
+  { ================================================================ }
+  { 5. CALCULO DAS MEDIAS                                            }
+  { ================================================================ }
+  vM1      := Media(pPeriodoM1, Close);
+  vM2      := Media(pPeriodoM2, Close);
+  vM1_ant  := Media(pPeriodoM1, Close)[1];
+  vM2_ant  := Media(pPeriodoM2, Close)[1];
+  vM1_ant2 := Media(pPeriodoM1, Close)[2];
+  vM2_ant2 := Media(pPeriodoM2, Close)[2];
+
+  { (BoldGlad-CML) Media lenta de tendencia - filtro direcional. }
+  vMediaTendencia := Media(pPeriodoTendencia, Close);
+
+
+  { ================================================================ }
+  { 6. PLOTAGEM DAS MEDIAS                                           }
+  { ================================================================ }
+  Plot(vM1);
+  Plot2(vM2);
+  Plot5(vMediaTendencia);   { (CML) linha do filtro de tendencia }
+
+
+  { ================================================================ }
+  { 7. LEITURA DE DADOS DA VELA ANTERIOR (somente em nova barra)     }
+  { ================================================================ }
+  if (bNovaBarra) then
+  begin
+    vOpen1  := Open[1];
+    vHigh1  := High[1];
+    vLow1   := Low[1];
+    vClose1 := Close[1];
+
+    { Reset das flags de mercado-ja-enviado a cada nova vela: o gatilho }
+    { e recalculado no bloco 13 (vHigh1+offset ou vLow1-offset) e o    }
+    { bloco 14 reavalia se o preco passou; uma nova vela = uma nova     }
+    { chance de tentar entrar (seja a stop ou a mercado).                }
+    bMarketComprouEnviado := False;
+    bMarketVendeuEnviado  := False;
+
+    { (CML-P1) Captura do range da 1a vela do pregao: quando a 1a vela  }
+    { do dia fecha (a primeira nova barra apos a virada de dia), grava  }
+    { topo e fundo dela. A partir dai o bloco 14 vigia o rompimento     }
+    { para a entrada de abertura a mercado.                              }
+    if (bAguardandoPrimVela) and (CurrentBar = (nBarraPrimVelaDia + 1)) then
+    begin
+      vAberturaHigh       := High[1];
+      vAberturaLow        := Low[1];
+      bAberturaArmada     := True;
+      bAguardandoPrimVela := False;
+      ConsoleLog("BG-CML-DIAG: Range da 1a vela do dia capturado - Topo " + Round(vAberturaHigh) + " - Fundo " + Round(vAberturaLow));
+    end;
+  end;
+
+
+  { ================================================================ }
+  { 8. SINAIS DAS MEDIAS                                             }
+  { ================================================================ }
+  { Vies: usa as medias atuais (recalculadas a cada tick).            }
+  { Cruzamento: usa medias de velas ja fechadas (vela 1 vs vela 2).   }
+  { Isso evita falsos cruzamentos intra-vela e garante que cada       }
+  { cruzamento detectado seja real e definitivo.                      }
+  { ================================================================ }
+  bVelaAntAlta  := (vClose1 > vOpen1);
+  bVelaAntBaixa := (vClose1 < vOpen1);
+
+  { Cruzamento so vale se vela 1 e vela 2 sao do mesmo dia da barra }
+  { atual. Sem isso, na primeira barra do novo dia o EA detectaria  }
+  { como "cruzamento novo" um cruzamento que aconteceu entre as duas}
+  { ultimas velas do dia ANTERIOR.                                    }
+  bCruzouParaCima  := (vM1_ant2 <= vM2_ant2) and (vM1_ant > vM2_ant)
+                     and (Date[1] = Date) and (Date[2] = Date);
+  bCruzouParaBaixo := (vM1_ant2 >= vM2_ant2) and (vM1_ant < vM2_ant)
+                     and (Date[1] = Date) and (Date[2] = Date);
+
+  { Proximidade das medias na vela 1 (fechada). Se Abs(M1-M2) ja    }
+  { esta dentro do limite, isso conta como evento equivalente a um  }
+  { cruzamento e dispara a mesma logica de formacao/manutencao da   }
+  { faixa de consolidacao (bloco 9). Mesma defesa de data: vela 1   }
+  { precisa ser do dia atual.                                        }
+  vLimiteProximidade := Close * (pPercProximidadeMedias / 100);
+  bMediasProximas    := (Abs(vM1_ant - vM2_ant) <= vLimiteProximidade)
+                       and (Date[1] = Date);
+
+  { Evento de cruzamento: cruzamento real OU proximidade -> tudo    }
+  { dispara o mesmo fluxo no bloco 9.                                }
+  bCruzDetectado := bCruzouParaCima or bCruzouParaBaixo or bMediasProximas;
+
+  { Inclinacao da M1 entre vela 2 e vela 1 (ambas fechadas). O      }
+  { limite e calculado como percentual do preco corrente (mesmo     }
+  { padrao do vLimiteProximidade). Se Abs(vInclinacaoM1) excede o   }
+  { limite, ativa o "vies antecipado" para o lado correspondente:   }
+  { inclinacao positiva forte -> compra antecipada;                  }
+  { inclinacao negativa forte -> venda antecipada.                   }
+  { Mesma defesa de data do cruzamento: velas 1 e 2 do mesmo dia.   }
+  { Gate por input: se pInclinacaoMediaRapida = False, ambas flags  }
+  { ficam False e bSinalCompra/Venda retornam ao comportamento      }
+  { original (apenas M1 vs M2 atual).                                }
+  vLimiteInclinacao := Close * (pValorInclinacaoMediaRapida / 100);
+  vInclinacaoM1     := vM1_ant - vM1_ant2;
+  bInclinacaoAlta   := (pInclinacaoMediaRapida)
+                      and (vInclinacaoM1 > vLimiteInclinacao)
+                      and (Date[1] = Date) and (Date[2] = Date);
+  bInclinacaoBaixa  := (pInclinacaoMediaRapida)
+                      and (vInclinacaoM1 < (0 - vLimiteInclinacao))
+                      and (Date[1] = Date) and (Date[2] = Date);
+
+  { Padrao de 3 velas - gatilho alternativo de vies:                 }
+  { Compra: vela 3 negativa OU doji + vela 2 positiva + vela 1 pos. }
+  { Venda:  vela 3 positiva OU doji + vela 2 negativa + vela 1 neg. }
+  { Vela 3 pode ser doji (Close = Open) - o que importa e que a    }
+  { vela 3 NAO seja contraria ao padrao. Velas 2 e 1 permanecem    }
+  { estritas (precisam ter direcao definida).                       }
+  { O gatilho de entrada (rompimento da maxima/minima da vela 1)    }
+  { e o mesmo do gatilho regular - so muda a condicao de vies.      }
+  { Mesma defesa de data: as 3 velas precisam ser do mesmo dia da   }
+  { barra atual. Gate por input: se pTradeVela3 = False, ambas      }
+  { flags ficam False.                                               }
+  bPadraoCompraV3 := (pTradeVela3)
+                    and (Close[3] <= Open[3])
+                    and (Close[2] > Open[2])
+                    and (Close[1] > Open[1])
+                    and (Date[1] = Date) and (Date[2] = Date) and (Date[3] = Date);
+  bPadraoVendaV3  := (pTradeVela3)
+                    and (Close[3] >= Open[3])
+                    and (Close[2] < Open[2])
+                    and (Close[1] < Open[1])
+                    and (Date[1] = Date) and (Date[2] = Date) and (Date[3] = Date);
+
+  { (BoldGlad-CML) Filtro de tendencia dominante: so libera compra    }
+  { quando o preco esta acima da media de tendencia e venda quando    }
+  { esta abaixo. Se pUsarFiltroTendencia = False, ambos ficam True    }
+  { (sem filtro) e o comportamento volta a ser o do CM.               }
+  bTendenciaCompra := (not pUsarFiltroTendencia) or (Close > vMediaTendencia);
+  bTendenciaVenda  := (not pUsarFiltroTendencia) or (Close < vMediaTendencia);
+
+  { Vies de entrada com priorizacao em 3 niveis:                    }
+  { 1) Inclinacao forte (mais antecipatorio) - vence tudo.           }
+  { 2) Padrao de 3 velas - vence o regular mas perde para inclinacao}
+  { 3) Regular (M1 vs M2 atual) - so atua se nada acima atuou.      }
+  { Quando todas as regras de um lado estao False, cai no comporta- }
+  { mento original (apenas M1 vs M2 atual).                          }
+  { (CML) O filtro de tendencia e aplicado como AND final - mesmo    }
+  { que o vies aponte para um lado, ele so vale a favor da tendencia.}
+  bSinalCompra := ( bInclinacaoAlta
+                or (bPadraoCompraV3 and (not bInclinacaoBaixa))
+                or ((vM1 > vM2) and (not bInclinacaoBaixa) and (not bPadraoVendaV3)) )
+                and bTendenciaCompra;
+  bSinalVenda  := ( bInclinacaoBaixa
+                or (bPadraoVendaV3 and (not bInclinacaoAlta))
+                or ((vM1 < vM2) and (not bInclinacaoAlta) and (not bPadraoCompraV3)) )
+                and bTendenciaVenda;
+
+  { Log de visibilidade quando a inclinacao forte esta ativa numa    }
+  { nova vela. Mesmo padrao dos outros BG-CML-DIAG: uma linha por    }
+  { nova vela quando o sinal estiver presente.                       }
+  if (bNovaBarra) and (pInclinacaoMediaRapida) then
+  begin
+    if (bInclinacaoAlta) then
+      ConsoleLog("BG-CML-DIAG: Inclinacao M1 ALTA forte (" + Round(vInclinacaoM1) + " pts, limite " + Round(vLimiteInclinacao) + " pts) - antecipa vies COMPRA");
+    if (bInclinacaoBaixa) then
+      ConsoleLog("BG-CML-DIAG: Inclinacao M1 BAIXA forte (" + Round(vInclinacaoM1) + " pts, limite -" + Round(vLimiteInclinacao) + " pts) - antecipa vies VENDA");
+  end;
+
+  { Log de visibilidade quando o padrao de 3 velas dispara - uma    }
+  { linha por nova vela quando o padrao estiver presente.            }
+  if (bNovaBarra) and (pTradeVela3) then
+  begin
+    if (bPadraoCompraV3) then
+      ConsoleLog("BG-CML-DIAG: Padrao V3 COMPRA detectado (Vela3 neg/doji, Vela2 pos, Vela1 pos) - gatilho @ H1+offset");
+    if (bPadraoVendaV3) then
+      ConsoleLog("BG-CML-DIAG: Padrao V3 VENDA detectado (Vela3 pos/doji, Vela2 neg, Vela1 neg) - gatilho @ L1-offset");
+  end;
+
+
+  { ================================================================ }
+  { 9. FAIXA DE CONSOLIDACAO                                         }
+  { ================================================================ }
+  { Quando o segundo cruzamento e detectado e esta proximo do        }
+  { primeiro, varre desde "pVelasAntesPrimCruz" velas anteriores ao  }
+  { primeiro cruzamento ate a vela do segundo cruzamento, registrando}
+  { a maior maxima (topo) e a menor minima (fundo) ao longo da janela}
+  {                                                                   }
+  { IMPORTANTE: a deteccao roda SOMENTE em nova barra. As medias     }
+  { usadas na comparacao sao das velas ja fechadas (vela 1 vs vela 2)}
+  { para evitar falsos cruzamentos intra-vela.                       }
+  {                                                                   }
+  { DEFESA POR DATA: cruzamentos e faixas tem a data gravada junto.  }
+  { - Se a faixa atual e de outro dia, ela e desfeita aqui.          }
+  { - Se o cruzamento anterior em memoria e de outro dia, e          }
+  {   descartado quando um novo cruzamento e detectado (o atual vira }
+  {   a 1a referencia da nova sequencia).                             }
+  { Isso permite que ao habilitar o EA com pregao em andamento, ele  }
+  { enxergue cruzamentos do dia ATUAL processados no historico e     }
+  { mantenha a faixa em vigor se houver dois cruzamentos proximos.   }
+  {                                                                   }
+  { REGRAS DE MEMORIA:                                                }
+  { SEM FAIXA ATIVA:                                                  }
+  { - Distancia > pDistMaxCruz -> atualiza referencia (cruzamento     }
+  {   atual vira a nova 1a referencia)                                }
+  { - Distancia <= pDistMaxCruz -> forma faixa                       }
+  { COM FAIXA ATIVA:                                                  }
+  { - Distancia > pDistMaxCruz -> NAO desfaz a faixa, NAO atualiza   }
+  {   a referencia (memoria mantem cruzamento anterior)               }
+  { - Distancia <= pDistMaxCruz -> RECONSTROI a faixa com varredura   }
+  {   entre cruzamento anterior em memoria e o atual; atualiza        }
+  {   referencia.                                                     }
+  {                                                                   }
+  { BUFFER (pBufferFaixa): apos a varredura, o topo recebe +buffer    }
+  { e o fundo recebe -buffer. A saida da faixa exige uma distancia   }
+  { ADICIONAL pDistSaidaFaixa alem desses limites ja ampliados.       }
+  { ================================================================ }
+
+  { Defesa: se a faixa atual foi formada em outro pregao, desfaz     }
+  { silenciosamente (sem disparar entrada por saida de faixa).        }
+  if (bEmConsolidacao) and (nDataFaixa <> Date) then
+  begin
+    bEmConsolidacao := False;
+    vTopoFaixa      := 0;
+    vFundoFaixa     := 0;
+    ConsoleLog("BG-CML: Faixa de outro pregao descartada");
+  end;
+
+  if (bNovaBarra) and (bCruzDetectado) then
+  begin
+    { Preco de referencia = ponto medio entre M1 e M2 no fechamento    }
+    { da vela do cruzamento. Como as medias acabaram de cruzar, esse  }
+    { ponto representa bem o "local visual" onde o cruzamento ocorreu.}
+    vPrecoCruzAtual := (vM1_ant + vM2_ant) / 2;
+
+    { Defesa: se a referencia em memoria e de outro pregao, descarta }
+    { e trata o cruzamento atual como o 1o da nova sequencia.         }
+    if (bTemCruzAnterior) and (nDataCruzAnt <> Date) then
+      bTemCruzAnterior := False;
+
+    if (bTemCruzAnterior) then
+    begin
+      vDistCruz := Abs(vPrecoCruzAtual - vPrecoCruzAnt);
+
+      if (bEmConsolidacao) then
+      begin
+        { === FAIXA JA ATIVA === }
+        if (vDistCruz <= pDistMaxCruz) then
+        begin
+          { RECONSTROI a faixa: varredura entre cruzamento anterior em  }
+          { memoria (nBarraPrimCruz) e o cruzamento atual (vela 1).      }
+          nDeslocPrimCruz     := (CurrentBar - 1) - nBarraPrimCruz;
+          nDeslocInicioJanela := nDeslocPrimCruz + pVelasAntesPrimCruz + 1;
+
+          if (nDeslocInicioJanela > (CurrentBar - 1)) then
+            nDeslocInicioJanela := CurrentBar - 1;
+
+          vTopoVarredura  := vHigh1;
+          vFundoVarredura := vLow1;
+
+          for nIdx := nDeslocInicioJanela DownTo 1 do
+          begin
+            vMaxVela := High[nIdx];
+            vMinVela := Low[nIdx];
+
+            if (vMaxVela > vTopoVarredura) then
+              vTopoVarredura := vMaxVela;
+
+            if (vMinVela < vFundoVarredura) then
+              vFundoVarredura := vMinVela;
+          end;
+
+          vTopoFaixa  := vTopoVarredura  + pBufferFaixa;
+          vFundoFaixa := vFundoVarredura - pBufferFaixa;
+          nDataFaixa  := Date;
+
+          ConsoleLog("BG-CML: Faixa RECONSTRUIDA - Dist. " + Round(vDistCruz) + " pts - TP " + Round(vTopoFaixa) + " - FS " + Round(vFundoFaixa));
+
+          { Atualiza referencia para o cruzamento atual (sera o ponto }
+          { de partida da proxima reconstrucao).                       }
+          vPrecoCruzAnt  := vPrecoCruzAtual;
+          nDataCruzAnt   := Date;
+          nBarraPrimCruz := CurrentBar - 1;
+        end
+        else
+        begin
+          { Dist > pDistMaxCruz dentro de faixa ativa: faixa NAO e     }
+          { desfeita e a memoria MANTEM o cruzamento anterior.         }
+          ConsoleLog("BG-CML: Cruzamento na faixa - Dist. " + Round(vDistCruz) + " pts > max - Faixa MANTIDA");
+        end;
+      end
+      else
+      begin
+        { === SEM FAIXA ATIVA === }
+        if (vDistCruz <= pDistMaxCruz) then
+        begin
+          { Forma nova faixa com varredura da janela. }
+          nDeslocPrimCruz     := (CurrentBar - 1) - nBarraPrimCruz;
+          nDeslocInicioJanela := nDeslocPrimCruz + pVelasAntesPrimCruz + 1;
+
+          if (nDeslocInicioJanela > (CurrentBar - 1)) then
+            nDeslocInicioJanela := CurrentBar - 1;
+
+          vTopoVarredura  := vHigh1;
+          vFundoVarredura := vLow1;
+
+          for nIdx := nDeslocInicioJanela DownTo 1 do
+          begin
+            vMaxVela := High[nIdx];
+            vMinVela := Low[nIdx];
+
+            if (vMaxVela > vTopoVarredura) then
+              vTopoVarredura := vMaxVela;
+
+            if (vMinVela < vFundoVarredura) then
+              vFundoVarredura := vMinVela;
+          end;
+
+          vTopoFaixa  := vTopoVarredura  + pBufferFaixa;
+          vFundoFaixa := vFundoVarredura - pBufferFaixa;
+
+          bEmConsolidacao := True;
+          nDataFaixa      := Date;
+          ConsoleLog("BG-CML: EA bloqueado - Faixa de consolidacao ativa - TP " + Round(vTopoFaixa) + " - FS " + Round(vFundoFaixa));
+
+          if (not HasPosition) then
+            CancelPendingOrders;
+        end
+        else
+        begin
+          { Dist > pDistMaxCruz sem faixa ativa: cruzamento antigo e   }
+          { descartado; o cruzamento atual vira a nova referencia.     }
+          ConsoleLog("BG-CML: Cruzamento Detectado - Dist. " + Round(vDistCruz) + " pts - Consolidacao - OFF");
+        end;
+
+        { Sem faixa ativa, a referencia sempre avanca para o atual. }
+        vPrecoCruzAnt  := vPrecoCruzAtual;
+        nDataCruzAnt   := Date;
+        nBarraPrimCruz := CurrentBar - 1;
+      end;
+    end
+    else
+    begin
+      { Primeiro cruzamento da sequencia - ainda nao ha distancia a medir }
+      ConsoleLog("BG-CML: Cruzamento Detectado - 1o cruzamento - Consolidacao - OFF");
+      vPrecoCruzAnt    := vPrecoCruzAtual;
+      bTemCruzAnterior := True;
+      nDataCruzAnt     := Date;
+      nBarraPrimCruz   := CurrentBar - 1;
+    end;
+  end;
+
+  if (bEmConsolidacao) then
+  begin
+    if (Close > (vTopoFaixa + pDistSaidaFaixa)) or
+       (Close < (vFundoFaixa - pDistSaidaFaixa)) then
+    begin
+      bEmConsolidacao := False;
+      ConsoleLog("BG-CML: EA liberado para operacao - Faixa desfeita");
+      { Apos a faixa ser desfeita, o EA volta a operar normalmente:    }
+      { aguarda o proximo gatilho stop (rompimento da maxima/minima da }
+      { vela anterior + offset, com vela anterior alinhada ao vies).    }
+    end;
+  end;
+
+
+  { ================================================================ }
+  { 10. DETECTAR SAIDA E BLOQUEAR REENTRADA NO MESMO CANDLE          }
+  { ================================================================ }
+  if (bTinhaPos) and (not HasPosition) then
+  begin
+    nBarraSaida := CurrentBar;
+
+    { (CML-P2) O trade acabou de fechar. Se fechou no lucro (lucro      }
+    { aberto positivo no ultimo tick com posicao), arma a reentrada na  }
+    { mesma direcao. Encadeia enquanto vencer; qualquer perda (ou zero) }
+    { limpa a cadeia e o EA volta a logica normal.                       }
+    if (pReentradaAposLucro) and (vUltimoLucroAberto > 0) then
+    begin
+      bReentradaArmada  := True;
+      nDirecaoReentrada := nDirecaoPos;
+      ConsoleLog("BG-CML-DIAG: Trade VENCEDOR (lucro " + Round(vUltimoLucroAberto) + " pts) - reentrada armada na mesma direcao do vencedor");
+    end
+    else
+    begin
+      bReentradaArmada  := False;
+      nDirecaoReentrada := 0;
+    end;
+  end;
+
+  bTinhaPos := HasPosition;
+
+  { (BoldGlad-CML) Janela de pausa apos a saida: bloqueia novas       }
+  { entradas enquanto CurrentBar estiver dentro de pVelasPausaAposSaida}
+  { velas a partir da vela da saida. Com pVelasPausaAposSaida = 1,     }
+  { equivale ao comportamento antigo (so a propria vela da saida). O  }
+  { guard nBarraSaida > 0 evita bloquear as primeiras velas do grafico.}
+  bEmPausaSaida := (nBarraSaida > 0)
+                  and (CurrentBar < (nBarraSaida + pVelasPausaAposSaida));
+
+
+  { ================================================================ }
+  { 11. SAIDAS DA POSICAO ABERTA                                     }
+  { ================================================================ }
+
+  if (HasPosition) and (nHoraAtual >= pHoraFim) then
+  begin
+    ClosePosition;
+    CancelPendingOrders;
+  end;
+
+  if (HasPosition) and (bLockDiario) then
+  begin
+    ClosePosition;
+    CancelPendingOrders;
+  end;
+
+
+  { ================================================================ }
+  { 12. GERENCIAMENTO DA POSICAO: STOP, ALVO, BREAKEVEN, TRAILING    }
+  { ================================================================ }
+
+  if (IsBought) then
+  begin
+    vEntrada     := BuyPrice;
+    vLucroAberto := Close - vEntrada;
+
+    { (CML-P2) Registra direcao e lucro aberto deste tick. No tick da   }
+    { saida (bloco 10), vUltimoLucroAberto guarda o valor do ultimo     }
+    { tick com posicao e diz se o trade fechou no lucro.                 }
+    nDirecaoPos        := 1;
+    vUltimoLucroAberto := vLucroAberto;
+
+    { Inicializacao do stop no primeiro tick da posicao. vStopAtual = 0 }
+    { e a flag: foi zerado no bloco "sem posicao" e so fica 0 ate a     }
+    { primeira passagem por aqui apos entrar. Isso cobre tambem o       }
+    { cenario de EA acionado com posicao comprada ja aberta.             }
+    if (vStopAtual = 0) then
+    begin
+      vStopAtual := vEntrada - pStopFixoPts;
+      vAlvoAtual := vEntrada + pAlvoFixoPts;
+      ConsoleLog("BG-CML: Posicao comprada detectada - Entrada " + Round(vEntrada) + " - Stop " + Round(vStopAtual) + " - Alvo " + Round(vAlvoAtual));
+    end;
+
+    { Breakeven gradual: a cada pStepBreakevenPts de avanco a favor,  }
+    { o stop e aproximado em pStepBreakevenPts da entrada. Quando o   }
+    { stop atinge a entrada (breakeven), o movimento para - o trailing}
+    { cuida do avanco alem disso. nStepsBE so cresce, entao o stop    }
+    { nunca afrouxa por este mecanismo.                                }
+    if (pUsarBreakeven) then
+    begin
+      nMaxStepsBE := pStopFixoPts / pStepBreakevenPts;
+      while (nStepsBE < nMaxStepsBE) and (vLucroAberto >= ((nStepsBE + 1) * pStepBreakevenPts)) do
+      begin
+        nStepsBE := nStepsBE + 1;
+      end;
+
+      vNivelBE := vEntrada - pStopFixoPts + (nStepsBE * pStepBreakevenPts);
+      if (vNivelBE > vStopAtual) then
+        vStopAtual := vNivelBE;
+    end;
+
+    { Trailing: a partir de pDistAcionaTrailing a favor, a cada nova  }
+    { vela o stop segue a minima da vela anterior (so aperta).         }
+    if (pUsarTrailing) then
+    begin
+      if (not bTrailingAcionado) then
+      begin
+        if (vLucroAberto >= pDistAcionaTrailing) then
+          bTrailingAcionado := True;
+      end;
+
+      if (bTrailingAcionado) and (bNovaBarra) then
+      begin
+        if ((vLow1 - pOffsetEntrada) > vStopAtual) then
+          vStopAtual := vLow1 - pOffsetEntrada;
+      end;
+    end;
+
+    { Reemissao das ordens de protecao a cada tick com a qty REAL da  }
+    { posicao no broker (Abs(PositionQty)). Manual NTSL secao 11.11:  }
+    { "cabe ao usuario gerenciar a quantidade de cada ordem caso voce }
+    { esteja posicionado em mais de um lote". Usar PositionQty cobre  }
+    { tambem o cenario de ajuste manual da posicao via UI do Profit.  }
+    vQtdPos    := Abs(PositionQty);
+    vAlvoAtual := vEntrada + pAlvoFixoPts;
+    SellToCoverStop(vStopAtual, vStopAtual, vQtdPos);
+    SellToCoverLimit(vAlvoAtual, vQtdPos);
+  end;
+
+  if (IsSold) then
+  begin
+    vEntrada     := SellPrice;
+    vLucroAberto := vEntrada - Close;
+
+    { (CML-P2) Registra direcao e lucro aberto deste tick (espelho da   }
+    { compra) para o bloco 10 saber se o trade vendido fechou no lucro. }
+    nDirecaoPos        := -1;
+    vUltimoLucroAberto := vLucroAberto;
+
+    { Inicializacao na primeira iteracao. Cobre tambem o cenario de EA }
+    { acionado com posicao vendida ja aberta.                           }
+    if (vStopAtual = 0) then
+    begin
+      vStopAtual := vEntrada + pStopFixoPts;
+      vAlvoAtual := vEntrada - pAlvoFixoPts;
+      ConsoleLog("BG-CML: Posicao vendida detectada - Entrada " + Round(vEntrada) + " - Stop " + Round(vStopAtual) + " - Alvo " + Round(vAlvoAtual));
+    end;
+
+    { Breakeven gradual espelhado: stop desce em direcao a entrada a }
+    { cada pStepBreakevenPts de lucro. "Mais apertado" em venda =   }
+    { stop mais baixo (mais perto da entrada).                       }
+    if (pUsarBreakeven) then
+    begin
+      nMaxStepsBE := pStopFixoPts / pStepBreakevenPts;
+      while (nStepsBE < nMaxStepsBE) and (vLucroAberto >= ((nStepsBE + 1) * pStepBreakevenPts)) do
+      begin
+        nStepsBE := nStepsBE + 1;
+      end;
+
+      vNivelBE := vEntrada + pStopFixoPts - (nStepsBE * pStepBreakevenPts);
+      if (vNivelBE < vStopAtual) then
+        vStopAtual := vNivelBE;
+    end;
+
+    if (pUsarTrailing) then
+    begin
+      if (not bTrailingAcionado) then
+      begin
+        if (vLucroAberto >= pDistAcionaTrailing) then
+          bTrailingAcionado := True;
+      end;
+
+      if (bTrailingAcionado) and (bNovaBarra) then
+      begin
+        if ((vHigh1 + pOffsetEntrada) < vStopAtual) then
+          vStopAtual := vHigh1 + pOffsetEntrada;
+      end;
+    end;
+
+    { Reemissao das ordens de protecao a cada tick com a qty REAL da }
+    { posicao no broker (Abs(PositionQty)) - mesma logica da compra.  }
+    vQtdPos    := Abs(PositionQty);
+    vAlvoAtual := vEntrada - pAlvoFixoPts;
+    BuyToCoverStop(vStopAtual, vStopAtual, vQtdPos);
+    BuyToCoverLimit(vAlvoAtual, vQtdPos);
+  end;
+
+  if (not HasPosition) then
+  begin
+    bTrailingAcionado := False;
+    nStepsBE          := 0;
+    vStopAtual        := 0;  { sera reinicializado quando a proxima posicao for aberta }
+  end;
+
+
+  { ================================================================ }
+  { 13. ARMAR / REARMAR GATILHOS DE ENTRADA (somente em nova barra)  }
+  { ================================================================ }
+  { Rearme continuo: enquanto o vies das medias continuar valido, a  }
+  { cada nova vela o gatilho e deslocado para a maxima (compra) ou    }
+  { minima (venda) da ultima vela fechada. O filtro de vela anterior  }
+  { alinhada (alta/baixa) so e exigido na PRIMEIRA armacao; apos isso }
+  { o gatilho acompanha a nova vela de referencia sem refiltrar.      }
+  { Se o vies virar, o gatilho e desarmado.                           }
+  { ================================================================ }
+  if (bNovaBarra) then
+  begin
+    { Diagnostico: nova barra mas alguma condicao geral bloqueia. Este }
+    { log e essencial para investigar bloqueios silenciosos do EA - so }
+    { remova com confirmacao explicita do trader.                       }
+    if (HasPosition) or (not bHoraOK) or (bLockDiario) or (bEmConsolidacao) then
+    begin
+      ConsoleLog("BG-CML-DIAG: Arm. block nova barra"
+                 + " | HasPos=" + BoolToString(HasPosition)
+                 + " | HoraOK=" + BoolToString(bHoraOK)
+                 + " | LockDiario=" + BoolToString(bLockDiario)
+                 + " | EmConsol=" + BoolToString(bEmConsolidacao)
+                 + " | PausaSaida=" + BoolToString(bEmPausaSaida)
+                 + " | Hora " + nHoraAtual);
+    end
+    else if (bReentradaArmada) then
+    begin
+      { (CML-P2) Reentrada forcada na direcao do trade vencedor. Fura a }
+      { pausa pos-saida e o filtro de vela anterior alinhada. Exige     }
+      { vies (M1xM2) E media de 50 a favor da continuacao; se faltar    }
+      { qualquer um, cancela a cadeia e o EA volta a logica normal.     }
+      if (nDirecaoReentrada = 1) and (vM1 > vM2) and (bTendenciaCompra) then
+      begin
+        bArmCompra     := True;
+        bArmVenda      := False;
+        vGatilhoCompra := vHigh1 + pOffsetEntrada;
+        ConsoleLog("BG-CML-DIAG: REENTRADA compra armada @ " + Round(vGatilhoCompra)
+                   + " (Hi1=" + Round(vHigh1) + " + offset=" + Round(pOffsetEntrada) + ")"
+                   + " | continuacao do trade vencedor comprado");
+      end
+      else if (nDirecaoReentrada = -1) and (vM1 < vM2) and (bTendenciaVenda) then
+      begin
+        bArmVenda     := True;
+        bArmCompra    := False;
+        vGatilhoVenda := vLow1 - pOffsetEntrada;
+        ConsoleLog("BG-CML-DIAG: REENTRADA venda armada @ " + Round(vGatilhoVenda)
+                   + " (Lo1=" + Round(vLow1) + " - offset=" + Round(pOffsetEntrada) + ")"
+                   + " | continuacao do trade vencedor vendido");
+      end
+      else
+      begin
+        bReentradaArmada  := False;
+        nDirecaoReentrada := 0;
+        bArmCompra        := False;
+        bArmVenda         := False;
+        ConsoleLog("BG-CML-DIAG: Reentrada CANCELADA - vies ou media de 50 nao confirmam a continuacao");
+      end;
+    end
+    else if (bEmPausaSaida) then
+    begin
+      ConsoleLog("BG-CML-DIAG: Arm. block - pausa pos-saida ativa | Hora " + nHoraAtual);
+    end
+    else
+    begin
+      { --- Compra --- }
+      if (bSinalCompra) then
+      begin
+        if (bArmCompra) or (bVelaAntAlta) then
+        begin
+          bArmCompra     := True;
+          bArmVenda      := False;
+          vGatilhoCompra := vHigh1 + pOffsetEntrada;
+          ConsoleLog("BG-CML-DIAG: Compra ARMADA gatilho @ " + Round(vGatilhoCompra)
+                     + " (Hi1=" + Round(vHigh1) + " + offset=" + Round(pOffsetEntrada) + ")"
+                     + " | M1=" + Round(vM1) + " M2=" + Round(vM2)
+                     + " | bVelaAntAlta=" + BoolToString(bVelaAntAlta));
+        end
+        else
+        begin
+          ConsoleLog("BG-CML-DIAG: Compra NAO armada"
+                     + " | Vies OK (M1=" + Round(vM1) + " > M2=" + Round(vM2) + ")"
+                     + " | mas vela anterior nao alinhada (Open1=" + Round(vOpen1) + " Close1=" + Round(vClose1) + ")");
+        end;
+      end
+      else
+      begin
+        if (bArmCompra) then
+        begin
+          ConsoleLog("BG-CML-DIAG: Compra DESARMADA - vies virou (M1=" + Round(vM1) + " <= M2=" + Round(vM2) + ")");
+          bArmCompra      := False;
+          bLogEnvioCompra := False;
+        end;
+      end;
+
+      { --- Venda --- }
+      if (bSinalVenda) then
+      begin
+        if (bArmVenda) or (bVelaAntBaixa) then
+        begin
+          bArmVenda     := True;
+          bArmCompra    := False;
+          vGatilhoVenda := vLow1 - pOffsetEntrada;
+          ConsoleLog("BG-CML-DIAG: Venda ARMADA gatilho @ " + Round(vGatilhoVenda)
+                     + " (Lo1=" + Round(vLow1) + " - offset=" + Round(pOffsetEntrada) + ")"
+                     + " | M1=" + Round(vM1) + " M2=" + Round(vM2)
+                     + " | bVelaAntBaixa=" + BoolToString(bVelaAntBaixa));
+        end
+        else
+        begin
+          ConsoleLog("BG-CML-DIAG: Venda NAO armada"
+                     + " | Vies OK (M1=" + Round(vM1) + " < M2=" + Round(vM2) + ")"
+                     + " | mas vela anterior nao alinhada (Open1=" + Round(vOpen1) + " Close1=" + Round(vClose1) + ")");
+        end;
+      end
+      else
+      begin
+        if (bArmVenda) then
+        begin
+          ConsoleLog("BG-CML-DIAG: Venda DESARMADA - vies virou (M1=" + Round(vM1) + " >= M2=" + Round(vM2) + ")");
+          bArmVenda      := False;
+          bLogEnvioVenda := False;
+        end;
+      end;
+    end;
+  end;
+
+  if (bEmConsolidacao) then
+  begin
+    bArmCompra      := False;
+    bArmVenda       := False;
+    bLogEnvioCompra := False;
+    bLogEnvioVenda  := False;
+  end;
+
+
+  { ================================================================ }
+  { 14. ENVIO DE ORDENS DE ENTRADA (a cada tick)                     }
+  { ================================================================ }
+  { Comportamento padrao: enviar ordem stop no gatilho (vGatilhoCompra }
+  { para compra, vGatilhoVenda para venda).                             }
+  {                                                                     }
+  { FALLBACK A MERCADO: quando o preco corrente (Close) ja passou do   }
+  { gatilho na direcao do trade (ex: subiu acima do vGatilhoCompra      }
+  { antes do EA conseguir enviar a stop), o broker rejeita a ordem     }
+  { stop (motivo: "ordem stop deve ter preco acima/abaixo do mercado").}
+  { Nesses casos o EA dispara uma ordem a mercado para nao perder o    }
+  { rompimento. Isso acontece em velas explosivas, especialmente na    }
+  { abertura do pregao com gap forte.                                   }
+  {                                                                     }
+  { Cuidado: o mercado executa imediatamente, entao NAO pode ser       }
+  { chamado a cada tick (geraria multiplas ordens). As flags           }
+  { bMarketComprou/VendeuEnviado garantem uma unica tentativa por      }
+  { vela. Resetam em nova barra (bloco 7), dando nova chance se a      }
+  { tentativa anterior nao executou.                                    }
+  {                                                                     }
+  { Trade-off conhecido: entrada a mercado num spike pode pegar topo/  }
+  { fundo e levar stop loss rapido se o movimento for falso. Aceito    }
+  { pelo trader como compromisso para nao perder rompimentos rapidos.  }
+
+  { (CML-P1) ENTRADA DE ABERTURA a mercado: assim que o preco rompe o   }
+  { range da 1a vela do pregao, entra a mercado no lado do rompimento,  }
+  { desde que a media de 50 (filtro de tendencia) concorde com o lado.  }
+  { Uma unica vez por dia (bAberturaUsada). bEntradaEnviadaNoTick evita }
+  { que o envio normal abaixo dispare uma segunda ordem no mesmo tick.  }
+  bEntradaEnviadaNoTick := False;
+
+  if (pTradeAbertura) and (bAberturaArmada) and (not bAberturaUsada)
+     and (not HasPosition) and (bHoraOK) and (not bLockDiario) and (not bEmConsolidacao) then
+  begin
+    if (Close < vAberturaLow) and (bTendenciaVenda) then
+    begin
+      SellShortAtMarket(pQtdContratos);
+      bAberturaUsada        := True;
+      nDirecaoPos           := -1;
+      bEntradaEnviadaNoTick := True;
+      ConsoleLog("BG-CML-DIAG: ABERTURA venda a mercado (Close=" + Round(Close)
+                 + " < fundo 1a vela=" + Round(vAberturaLow) + ")"
+                 + " | Qtd=" + Round(pQtdContratos) + " | Hora " + nHoraAtual);
+    end
+    else if (Close > vAberturaHigh) and (bTendenciaCompra) then
+    begin
+      BuyAtMarket(pQtdContratos);
+      bAberturaUsada        := True;
+      nDirecaoPos           := 1;
+      bEntradaEnviadaNoTick := True;
+      ConsoleLog("BG-CML-DIAG: ABERTURA compra a mercado (Close=" + Round(Close)
+                 + " > topo 1a vela=" + Round(vAberturaHigh) + ")"
+                 + " | Qtd=" + Round(pQtdContratos) + " | Hora " + nHoraAtual);
+    end;
+  end;
+
+  { Envio normal / reentrada. A reentrada apos lucro (P2) FURA a pausa  }
+  { pos-saida (por isso o "or bReentradaArmada"). bEntradaEnviadaNoTick }
+  { impede envio duplo quando a abertura (P1) ja entrou neste tick.     }
+  if (not HasPosition) and (bHoraOK) and (not bLockDiario) and (not bEmConsolidacao)
+     and ((not bEmPausaSaida) or (bReentradaArmada)) and (not bEntradaEnviadaNoTick) then
+  begin
+
+    if (bArmCompra) then
+    begin
+      if (Close >= vGatilhoCompra) then
+      begin
+        { Preco ja passou do gatilho - fallback a mercado (uma vez por vela). }
+        if (not bMarketComprouEnviado) then
+        begin
+          BuyAtMarket(pQtdContratos);
+          bMarketComprouEnviado := True;
+          ConsoleLog("BG-CML-DIAG: BuyAtMarket enviado (Close=" + Round(Close)
+                     + " >= gatilho=" + Round(vGatilhoCompra) + ") - rompimento intra-vela"
+                     + " | Qtd=" + Round(pQtdContratos) + " | Hora " + nHoraAtual);
+        end;
+      end
+      else
+      begin
+        BuyStop(vGatilhoCompra, vGatilhoCompra, pQtdContratos);
+        if (not bLogEnvioCompra) then
+        begin
+          ConsoleLog("BG-CML-DIAG: BuyStop enviado @ " + Round(vGatilhoCompra)
+                     + " (Hi1=" + Round(vHigh1) + " + offset=" + Round(pOffsetEntrada) + ")"
+                     + " | Qtd=" + Round(pQtdContratos) + " | Hora " + nHoraAtual);
+          bLogEnvioCompra := True;
+        end;
+      end;
+    end
+    else if (bArmVenda) then
+    begin
+      if (Close <= vGatilhoVenda) then
+      begin
+        { Preco ja passou do gatilho - fallback a mercado (uma vez por vela). }
+        if (not bMarketVendeuEnviado) then
+        begin
+          SellShortAtMarket(pQtdContratos);
+          bMarketVendeuEnviado := True;
+          ConsoleLog("BG-CML-DIAG: SellShortAtMarket enviado (Close=" + Round(Close)
+                     + " <= gatilho=" + Round(vGatilhoVenda) + ") - rompimento intra-vela"
+                     + " | Qtd=" + Round(pQtdContratos) + " | Hora " + nHoraAtual);
+        end;
+      end
+      else
+      begin
+        SellShortStop(vGatilhoVenda, vGatilhoVenda, pQtdContratos);
+        if (not bLogEnvioVenda) then
+        begin
+          ConsoleLog("BG-CML-DIAG: SellShortStop enviado @ " + Round(vGatilhoVenda)
+                     + " (Lo1=" + Round(vLow1) + " - offset=" + Round(pOffsetEntrada) + ")"
+                     + " | Qtd=" + Round(pQtdContratos) + " | Hora " + nHoraAtual);
+          bLogEnvioVenda := True;
+        end;
+      end;
+    end;
+
+  end;
+
+
+  { ================================================================ }
+  { 15. RESETAR GATILHO APOS ENTRADA EXECUTADA                       }
+  { ================================================================ }
+  if (IsBought) then
+  begin
+    bArmCompra      := False;
+    bLogEnvioCompra := False;
+  end;
+
+  if (IsSold) then
+  begin
+    bArmVenda      := False;
+    bLogEnvioVenda := False;
+  end;
+
+
+  { ================================================================ }
+  { 16. CANCELAR ORDENS PENDENTES QUANDO NAO HA POSICAO E SEM SETUP  }
+  { ================================================================ }
+  if (not HasPosition) and (not bArmCompra) and (not bArmVenda) then
+    CancelPendingOrders;
+
+
+  { ================================================================ }
+  { 17. PLOTAGEM DA FAIXA DE CONSOLIDACAO                            }
+  { ================================================================ }
+  if (bEmConsolidacao) then
+  begin
+    Plot3(vTopoFaixa);
+    Plot4(vFundoFaixa);
+  end;
+
+
+  { ================================================================ }
+  { 18. SINALIZACAO VISUAL                                           }
+  { ================================================================ }
+  if (IsBought) then
+    PaintBar(clVerde)
+  else if (IsSold) then
+    PaintBar(clVermelho);
+
+  if (bArmCompra) and (not HasPosition) then
+    PlotText("BUY", clVerde, 0, 7);
+
+  if (bArmVenda) and (not HasPosition) then
+    PlotText("SELL", clVermelho, 2, 7);
+
+  if (bEmConsolidacao) and (not HasPosition) then
+    PaintBar(clAmarelo);
+
+
+end;
