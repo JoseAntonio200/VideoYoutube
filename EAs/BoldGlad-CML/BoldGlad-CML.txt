@@ -11,9 +11,12 @@
 {  2. MENOS ENTRADAS: gatilhos de antecipacao (inclinacao e padrao  }
 {     de 3 velas) vem DESLIGADOS por padrao + pausa de N velas      }
 {     apos cada saida de posicao (pVelasPausaAposSaida).             }
-{  3. TRAVA-DIA A PROVA DE REINICIO: por padrao o contador de perda }
-{     do dia NAO zera ao reabilitar o EA no meio do pregao           }
-{     (pResetarPlacarAoReiniciar = False).                           }
+{  3. TRAVA-DIA EM PONTOS, INTERNA: o resultado do dia (meta, loss   }
+{     e trailing) e somado internamente (trades fechados +          }
+{     flutuante), funcionando em replay e ao vivo. Ao reativar o EA  }
+{     no meio do pregao, o acumulador e semeado com o resultado     }
+{     real do dia (DailyResult) para a trava considerar a perda ja  }
+{     ocorrida antes do reinicio.                                    }
 {                                                                    }
 { Entrada por gatilho STOP no rompimento da maxima/minima da vela   }
 { anterior + offset.                                                 }
@@ -95,11 +98,14 @@ input
   pHoraFim(1730);                 { horario de termino (HHMM) }
 
   { --- Gestao diaria --- }
+  { (CML) O resultado do dia e contabilizado INTERNAMENTE em PONTOS    }
+  { (soma dos trades fechados + flutuante). Os limites abaixo sao em   }
+  { pontos. pValorPontoRS so e usado para converter o DailyResult ao   }
+  { SEMEAR o acumulador num reinicio no meio do dia (bloco 4).         }
   pMetaDiariaPts(2000.0);         { ganho maximo no dia em pontos - so bloqueia se o trailing (vLucroAcumRef) ainda nao foi armado }
   pLossMaxDiarioPts(1000.0);      { perda maxima no dia em pontos }
-  pValorPontoRS(0.20);            { valor financeiro de 1 ponto do ativo (R$ 0,20 = WIN) }
   pLucroRef(1100.0);              { ponto de armamento do trailing de protecao do lucro - quando vResultadoDia atinge esse valor, o trailing arma; depois, se vResultadoDia cair para 70% do pico (vLucroAcumRef), ou seja perda de 30% do pico, o EA bloqueia o dia }
-  pResetarPlacarAoReiniciar(False); { (BoldGlad-CML) se True, ao reabilitar o EA no meio do dia ele zera o contador de perda/lucro do dia (baseline) - comportamento antigo do CM. Se False (default), o limite de perda diaria vale para o DIA INTEIRO mesmo apos reinicios - a trava nao e desarmada ao religar o EA. }
+  pValorPontoRS(0.20);            { valor financeiro de 1 ponto do ativo em R$ (0.20 = WIN) - usado SO na semeadura do resultado do dia ao reativar o EA (converte DailyResult R$ -> pontos) }
 
   { --- Faixa de consolidacao --- }
   pDistMaxCruz(50.0);             { distancia maxima entre dois cruzamentos para formar faixa }
@@ -230,10 +236,10 @@ var
   nData              : Integer;
   nHoraAtual         : Integer;
   bHoraOK            : Boolean;
-  bLockDiario        : Boolean;
-  vResultadoDia      : Float;
-  vBaselineResultado : Float;        { resultado do dia capturado na hora que o EA entrou em tempo real - zera o placar apos reinicio }
-  bRTInicializado    : Boolean;      { indica se a captura do baseline ja aconteceu nesta execucao }
+  bLockDiario          : Boolean;
+  vResultadoDia        : Float;      { resultado do dia em pontos (realizado + flutuante da posicao aberta) }
+  vResultadoDiaInterno : Float;      { (CML) soma dos trades FECHADOS no dia, em pontos - acumulador interno (funciona em replay e ao vivo) }
+  bRTInicializado      : Boolean;    { (CML) True apos semear o acumulador com o DailyResult na 1a vez em tempo real desta execucao }
 
   { --- Trailing de protecao do lucro acumulado --- }
   vLucroAcumRef      : Float;        { pico do lucro acumulado do dia, em pontos - inicia em pLucroRef e sobe quando vResultadoDia > vLucroAcumRef ao fechar nova vela }
@@ -256,9 +262,9 @@ begin
     nDataCruzAnt       := 0;
     nDataFaixa         := 0;
     bTrailingAcionado  := False;
-    vResultadoDia      := 0;
-    vBaselineResultado := 0;
-    bRTInicializado    := False;
+    vResultadoDia        := 0;
+    vResultadoDiaInterno := 0;
+    bRTInicializado      := False;
     vLucroAcumRef      := 0;          { zera primeiro (item 6 do requisito) ... }
     vLucroAcumRef      := pLucroRef;  { ... e em seguida carrega pLucroRef }
     bLucroRefAtingido  := False;
@@ -297,8 +303,8 @@ begin
   begin
     nData              := Date;
     bLockDiario        := False;
-    vResultadoDia      := 0;
-    vBaselineResultado := 0;
+    vResultadoDia        := 0;
+    vResultadoDiaInterno := 0;
     bEmConsolidacao    := False;
     bTemCruzAnterior   := False;
     bArmCompra         := False;
@@ -336,36 +342,32 @@ begin
   { ================================================================ }
   { 4. GESTAO DIARIA                                                 }
   { ================================================================ }
-  { Ao entrar em tempo real pela primeira vez nesta execucao, captura }
-  { o resultado atual como baseline e zera o lock. Isso faz o EA      }
-  { voltar a operar apos reinicio no meio do dia, mesmo que a meta ou }
-  { loss ja tenha sido atingida antes do reinicio. A contagem reinicia}
-  { do zero ate atingir novamente pMetaDiariaPts ou pLossMaxDiarioPts.}
-  { (BoldGlad-CML) Por padrao a trava diaria sobrevive a reinicios: ao }
-  { reabilitar o EA no meio do dia, o contador NAO e zerado, entao o   }
-  { limite de perda diaria vale para o dia inteiro. So zera o placar    }
-  { (baseline) se pResetarPlacarAoReiniciar = True (comportamento CM).  }
+  { (CML) O resultado do dia e contabilizado em PONTOS:               }
+  { vResultadoDiaInterno acumula o resultado de cada trade FECHADO no }
+  { dia (bancado no bloco 10); aqui somamos o flutuante da posicao    }
+  { aberta. A contagem corrente NAO depende de DailyResult - que no   }
+  { replay nao acumula - entao a trava funciona igual em replay e ao  }
+  { vivo.                                                             }
+  {                                                                    }
+  { REINICIO NO MEIO DO DIA (ao vivo): na 1a vez que esta execucao    }
+  { chega ao tempo real, o acumulador e SEMEADO com o resultado REAL  }
+  { do dia ate agora (DailyResult em R$ -> pontos via pValorPontoRS). }
+  { Assim a perda ja realizada antes do reinicio e somada para        }
+  { decidir se o EA ainda pode operar: se o dia ja passou do limite,  }
+  { ele volta TRAVADO (a checagem de loss abaixo dispara no mesmo     }
+  { tick). Em replay DailyResult e ~0, entao a semeadura nao muda     }
+  { nada e a contagem interna toca o jogo.                            }
   if (not bRTInicializado) and (LastBarOnChart) then
   begin
-    if (pResetarPlacarAoReiniciar) then
-    begin
-      vBaselineResultado := DailyResult(True);
-      bLockDiario        := False;
-    end;
-    bRTInicializado    := True;
-
-    { A memoria de cruzamentos e a faixa de consolidacao nao sao       }
-    { zeradas aqui. A defesa contra dados de pregoes anteriores e por }
-    { DATA (secao 9). Assim, ao entrar em RT no meio do pregao, o EA }
-    { enxerga todos os cruzamentos do dia atual processados no        }
-    { historico e mantem a faixa em vigor se houver.                  }
+    vResultadoDiaInterno := DailyResult(True) / (pValorPontoRS * pQtdContratos);
+    bRTInicializado      := True;
   end;
 
-  { DailyResult(True) retorna o resultado em VALOR FINANCEIRO (R$).   }
-  { Convertemos para PONTOS dividindo por (pValorPontoRS x qtd de    }
-  { contratos) para que a comparacao com pMetaDiariaPts e            }
-  { pLossMaxDiarioPts seja feita na mesma unidade (pontos).           }
-  vResultadoDia := (DailyResult(True) - vBaselineResultado) / (pValorPontoRS * pQtdContratos);
+  vResultadoDia := vResultadoDiaInterno;
+  if (IsBought) then
+    vResultadoDia := vResultadoDiaInterno + (Close - BuyPrice)
+  else if (IsSold) then
+    vResultadoDia := vResultadoDiaInterno + (SellPrice - Close);
 
   { Atualizacao do pico do lucro acumulado (item 3 do requisito): a   }
   { cada fechamento de nova vela, se o lucro acumulado bateu novo    }
@@ -396,19 +398,19 @@ begin
   if (not bLockDiario) and (vResultadoDia <= -pLossMaxDiarioPts) then
   begin
     bLockDiario := True;
-    ConsoleLog("BG-CML: Lock diario - loss maximo diario atingido @ " + Round(vResultadoDia) + " pts (limite -" + Round(pLossMaxDiarioPts) + ")");
+    ConsoleLog("BG-CML: EA PAROU DE OPERAR - perda maxima do dia atingida @ " + Round(vResultadoDia) + " pts (limite -" + Round(pLossMaxDiarioPts) + " pts) - bloqueado ate o proximo pregao");
   end;
 
   if (not bLockDiario) and (bLucroRefAtingido) and (vResultadoDia <= (vLucroAcumRef * 0.70)) then
   begin
     bLockDiario := True;
-    ConsoleLog("BG-CML: Lock diario - lucro caiu para 70% do pico (perda de 30%) - pico " + Round(vLucroAcumRef) + " pts - atual " + Round(vResultadoDia) + " pts");
+    ConsoleLog("BG-CML: EA PAROU DE OPERAR - lucro recuou 30% do pico do dia - pico " + Round(vLucroAcumRef) + " pts - atual " + Round(vResultadoDia) + " pts - bloqueado ate o proximo pregao");
   end;
 
   if (not bLockDiario) and (not bLucroRefAtingido) and (vResultadoDia >= pMetaDiariaPts) then
   begin
     bLockDiario := True;
-    ConsoleLog("BG-CML: Lock diario - meta diaria atingida @ " + Round(vResultadoDia) + " pts (limite " + Round(pMetaDiariaPts) + ")");
+    ConsoleLog("BG-CML: EA PAROU DE OPERAR - meta (lucro maximo) do dia atingida @ " + Round(vResultadoDia) + " pts (limite " + Round(pMetaDiariaPts) + " pts) - bloqueado ate o proximo pregao");
   end;
 
 
@@ -778,6 +780,11 @@ begin
   if (bTinhaPos) and (not HasPosition) then
   begin
     nBarraSaida := CurrentBar;
+
+    { (CML) Banca o resultado do trade que acabou de fechar no          }
+    { acumulador diario (em pontos). vUltimoLucroAberto e o lucro/preju }
+    { do ultimo tick com posicao - resultado realizado aproximado.      }
+    vResultadoDiaInterno := vResultadoDiaInterno + vUltimoLucroAberto;
 
     { (CML-P2) O trade acabou de fechar. Se fechou no lucro (lucro      }
     { aberto positivo no ultimo tick com posicao), arma a reentrada na  }

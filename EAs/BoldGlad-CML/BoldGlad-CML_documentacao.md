@@ -17,7 +17,7 @@ O robô é bidirecional (compra e vende) e possui:
 - **Proteção contra mercados lateralizados** via faixa de consolidação (com buffer, reconstrução, e gatilho adicional por proximidade das médias).
 - **Pausa após saída** de N velas para cortar o rearme em sequência (overtrading).
 - **Gestão de posição** com stop fixo, alvo fixo, breakeven gradual e trailing stop.
-- **Controles** de horário, meta diária, perda máxima diária (à prova de reinício) e trailing de proteção do lucro acumulado.
+- **Controles** de horário, meta diária, perda máxima diária e trailing de proteção do lucro acumulado — todos contabilizados **internamente em pontos** (funcionam em replay e ao vivo).
 
 **Diferenças em relação ao BoldGlad-CRTF:** o BoldGlad-CML **não inverte a posição** quando ocorre um cruzamento contrário. Se o EA estiver comprado e M1 cruzar abaixo de M2, a posição comprada permanece aberta sob a gestão normal (stop, alvo, breakeven, trailing, horário, lock diário). O CRTF fecha imediatamente nesse caso.
 
@@ -27,14 +27,14 @@ O BoldGlad-CML nasceu como cópia exata do BoldGlad-CM e recebeu **três mudanç
 
 1. **Filtro de tendência dominante** (`pUsarFiltroTendencia`, `pPeriodoTendencia`): uma média lenta (default 50) define a direção do dia. O viés de compra só vira ordem se o preço estiver **acima** dessa média; o de venda, só **abaixo**. Em dia de queda, o EA deixa de comprar contra a tendência. Ver seção 2.1.3.
 2. **Menos entradas:** os gatilhos de antecipação de viés (inclinação forte da M1 e padrão de 3 velas) vêm **desligados por padrão** (`pInclinacaoMediaRapida = False`, `pTradeVela3 = False`), e uma **pausa de N velas após cada saída** de posição (`pVelasPausaAposSaida`, default 3) evita o rearme imediato em sequência. Ver seção 3.6.
-3. **Trava-dia à prova de reinício** (`pResetarPlacarAoReiniciar`, default False): por padrão o contador de perda do dia **não zera** ao reabilitar o EA no meio do pregão — o limite de perda diária vale para o dia inteiro. Ver seção 6.3.
+3. **Trava-dia em pontos, contabilizada internamente:** o resultado do dia (meta, perda máxima e trailing de proteção) é somado pelo próprio robô — resultado dos trades fechados + flutuante da posição aberta — sem depender de `DailyResult`. Assim a trava funciona igual em replay/backtest e ao vivo. Ver seção 6.3. _(Substituiu o parâmetro `pResetarPlacarAoReiniciar`, que dependia de `DailyResult` e não funcionava em replay.)_
 
 E, numa segunda rodada, **duas rotas de entrada novas**:
 
 4. **Entrada de abertura (P1)** (`pTradeAbertura`, default True): no rompimento do range da 1ª vela do pregão (09:00), entra a mercado, uma vez por dia, só a favor da média de 50. `pHoraInicio` passou a **0900**. Ver seção 3.7.
 5. **Reentrada após lucro (P2)** (`pReentradaAposLucro`, default True): após um trade vencedor, repete na mesma direção no rompimento da vela que fechou, furando a pausa, exigindo viés (M1×M2) **e** média de 50 a favor; encadeia enquanto vencer. Ver seção 3.8.
 
-Todos os comportamentos são **configuráveis**: para fazer o CML operar idêntico ao CM, basta `pUsarFiltroTendencia = False`, `pInclinacaoMediaRapida = True`, `pTradeVela3 = True`, `pVelasPausaAposSaida = 1`, `pResetarPlacarAoReiniciar = True`, `pTradeAbertura = False`, `pReentradaAposLucro = False` e `pHoraInicio = 0905`.
+Todos os comportamentos são **configuráveis**: para fazer o CML operar idêntico ao CM, basta `pUsarFiltroTendencia = False`, `pInclinacaoMediaRapida = True`, `pTradeVela3 = True`, `pVelasPausaAposSaida = 1`, `pTradeAbertura = False`, `pReentradaAposLucro = False` e `pHoraInicio = 0905`. _(A contabilidade interna do resultado diário não tem liga/desliga — é sempre interna no CML.)_
 
 **Tag de log:** todos os logs do CML usam o prefixo `BG-CML:` / `BG-CML-DIAG:` (o CM usa `BG-CM:`), para poderem ser filtrados separadamente no painel de eventos do Profit.
 
@@ -396,17 +396,22 @@ Janela definida por `pHoraInicio` (padrão **09:00** no CML, para a entrada de a
 
 ### 6.2 Meta diária, loss máximo e trailing de proteção do lucro
 
-O robô monitora o resultado acumulado em **pontos** (convertido de R$ via `pValorPontoRS`):
+O robô monitora o resultado acumulado do dia em **pontos**, contabilizado **internamente**:
 
 ```
-vResultadoDia = (DailyResult(True) − vBaselineResultado) / (pValorPontoRS × pQtdContratos)
+vResultadoDiaInterno = soma do resultado de cada trade FECHADO no dia (em pontos)
+vResultadoDia        = vResultadoDiaInterno + flutuante da posição aberta
 ```
 
-Três condições disparam o lock diário (qualquer uma fecha posição aberta e impede novas operações até o próximo dia, ou até reinício do EA conforme 6.3):
+O resultado de cada trade é bancado no `vResultadoDiaInterno` quando a posição fecha (bloco 10), usando o lucro/prejuízo do último tick com posição (`vUltimoLucroAberto`, em pontos). Enquanto há posição aberta, o flutuante é somado para que a trava possa agir também no meio do trade. Os limites (`pLossMaxDiarioPts`, `pMetaDiariaPts`, `pLucroRef`) são comparados diretamente em pontos.
+
+> **Por que interno:** `DailyResult(True)` não acumula o resultado simulado no modo **replay/backtest**, então a trava nunca disparava ali. A soma interna funciona igual em replay e ao vivo. A **única** vez que `DailyResult` é consultado é na **semeadura** do acumulador ao entrar em tempo real (recuperar a perda do dia após um reinício — ver 6.3).
+
+Três condições disparam o lock diário (qualquer uma fecha posição aberta e impede novas operações até o próximo dia):
 
 **a) Loss máximo diário — sempre ativo:**
 - `vResultadoDia ≤ −pLossMaxDiarioPts` → lock.
-- Log: `BG-CML: Lock diario - loss maximo diario atingido @ X pts (limite -Y)`.
+- Log: `BG-CML: EA PAROU DE OPERAR - perda maxima do dia atingida @ X pts (limite -Y pts) - bloqueado ate o proximo pregao`.
 
 **b) Trailing de proteção do lucro — ativo após `pLucroRef` ser atingido:**
 
@@ -417,11 +422,11 @@ Quando `vResultadoDia ≥ pLucroRef` pela primeira vez no dia, o trailing **arma
 
 A partir desse momento:
 - `vResultadoDia ≤ vLucroAcumRef × 0.70` (lucro cai para 70% do pico — perda de 30%) → lock.
-- Log: `BG-CML: Lock diario - lucro caiu para 70% do pico (perda de 30%) - pico X pts - atual Y pts`.
+- Log: `BG-CML: EA PAROU DE OPERAR - lucro recuou 30% do pico do dia - pico X pts - atual Y pts - bloqueado ate o proximo pregao`.
 
 **c) Meta diária — ativa SOMENTE enquanto o trailing não armou:**
 - Se `bLucroRefAtingido = False` E `vResultadoDia ≥ pMetaDiariaPts` → lock.
-- Log: `BG-CML: Lock diario - meta diaria atingida @ X pts (limite Y)`.
+- Log: `BG-CML: EA PAROU DE OPERAR - meta (lucro maximo) do dia atingida @ X pts (limite Y pts) - bloqueado ate o proximo pregao`.
 - Uma vez que o trailing arma, a meta diária deixa de bloquear (opção A do requisito) — o EA segue rodando até o trailing disparar.
 
 **Resumo das prioridades:**
@@ -431,16 +436,25 @@ A partir desse momento:
 | Antes de `vResultadoDia` atingir `pLucroRef` | Meta diária + loss diário |
 | Após `vResultadoDia` atingir `pLucroRef` (trailing armado) | Trailing (vLucroAcumRef × 0.70) + loss diário |
 
-### 6.3 Comportamento ao reiniciar o EA no meio do dia (à prova de reinício no CML)
+### 6.3 Comportamento ao reiniciar o EA no meio do dia (semeadura à prova de reinício)
 
-Controlado por `pResetarPlacarAoReiniciar`:
+O resultado do dia é um **acumulador interno** (6.2). Para que ele conte também o que aconteceu **antes** de um reinício, na **primeira vez que a execução chega ao tempo real** (`LastBarOnChart`) o robô **semeia** o acumulador com o resultado **real** do dia até ali:
 
-- **`False` (default do CML — à prova de reinício):** ao reabilitar o EA no meio do pregão, o contador do dia **não é zerado**. O `vResultadoDia` reflete o resultado real do dia inteiro (`DailyResult`), então o limite de perda diária (`pLossMaxDiarioPts`) e a meta diária continuam valendo independentemente de quantas vezes o EA foi religado. Se o dia já estava no prejuízo máximo, o EA volta **já travado**.
-- **`True` (comportamento antigo do CM):** ao entrar em tempo real, o EA captura o resultado atual como **baseline** (`vBaselineResultado`) e zera o lock. A contagem reinicia do zero, e o lock só volta a ativar se `pMetaDiariaPts` ou `pLossMaxDiarioPts` forem atingidos **a partir desse ponto**.
+```
+vResultadoDiaInterno := DailyResult(True) / (pValorPontoRS × pQtdContratos)   { R$ → pontos, uma única vez }
+```
 
-**Motivação da mudança:** no pregão de 03/06/2026 o EA (versão CM) foi reiniciado durante o dia. Cada reinício zerou o contador de perda, desarmando a trava de R$2.000 justamente no pior dia — o prejuízo chegou a R$4.450. Com o default `False`, esse vazamento não acontece.
+A partir daí, os trades novos são somados normalmente sobre essa base. Consequências:
 
-A memória de cruzamentos e a faixa de consolidação **não são zeradas** nesse momento (em nenhum dos modos) — a defesa contra dados de pregões anteriores é por **data**, então cruzamentos do dia atual processados durante o histórico permanecem válidos.
+- **Ao vivo, reativando no meio do pregão:** o EA carrega a **perda total já realizada no dia** e, se ela já passou de `pLossMaxDiarioPts`, **volta travado** (a checagem de loss roda no mesmo tick da semeadura). É exatamente o "somar a perda do dia para decidir se opera".
+- **Ao vivo, execução contínua:** a semeadura ocorre uma vez (no início, com `DailyResult` ≈ 0) e a contagem segue interna o dia todo.
+- **Replay/backtest:** `DailyResult` ≈ 0, então a semeadura não altera nada e a soma interna comanda a trava — que é o que faltava funcionar no replay.
+
+A semeadura usa `DailyResult` **uma única vez por execução** (flag `bRTInicializado`); a contagem corrente nunca depende de `DailyResult`, por isso funciona em replay.
+
+> **Observação:** se o EA for reativado **com uma posição aberta herdada**, o flutuante dessa posição pode ser contado duas vezes até ela fechar (no `DailyResult` da semeadura e no flutuante somado no bloco 4). É um caso de borda raro — o robô normalmente está zerado entre trades. Como rede extra de segurança em conta real, o **"Limite Perda" nativo do Profit** continua recomendado.
+
+A memória de cruzamentos e a faixa de consolidação seguem sendo defendidas por **data** — cruzamentos do dia atual processados durante o histórico permanecem válidos.
 
 Memória de cruzamentos e faixa de consolidação **não são zeradas** nesse momento — a defesa contra dados de pregões anteriores é por **data**, então cruzamentos do dia atual processados durante o histórico permanecem válidos.
 
@@ -479,9 +493,9 @@ Todos prefixados com `BG-CML:` (operacionais) ou `BG-CML-DIAG:` (diagnóstico �
 **Gestão diária (lock e trailing):**
 
 - `BG-CML: Lucro de referencia atingido - trailing armado @ X pts - bloqueio se cair para Y pts ou menos do pico` (uma única vez por dia, quando vResultadoDia atinge pLucroRef)
-- `BG-CML: Lock diario - loss maximo diario atingido @ X pts (limite -Y)`
-- `BG-CML: Lock diario - lucro caiu para 70% do pico (perda de 30%) - pico X pts - atual Y pts`
-- `BG-CML: Lock diario - meta diaria atingida @ X pts (limite Y)`
+- `BG-CML: EA PAROU DE OPERAR - perda maxima do dia atingida @ X pts (limite -Y pts) - bloqueado ate o proximo pregao`
+- `BG-CML: EA PAROU DE OPERAR - lucro recuou 30% do pico do dia - pico X pts - atual Y pts - bloqueado ate o proximo pregao`
+- `BG-CML: EA PAROU DE OPERAR - meta (lucro maximo) do dia atingida @ X pts (limite Y pts) - bloqueado ate o proximo pregao`
 
 **Detecção de posição (no primeiro tick com posição):**
 
@@ -580,9 +594,10 @@ Todos prefixados com `BG-CML:` (operacionais) ou `BG-CML-DIAG:` (diagnóstico �
 |---|---|---|
 | `pMetaDiariaPts` | 2000.0 | Ganho máximo no dia em pontos. **Só bloqueia enquanto o trailing (`pLucroRef`) não estiver armado** — após armar, é ignorado. |
 | `pLossMaxDiarioPts` | 1000.0 | Perda máxima no dia em pontos. Sempre ativo. |
-| `pValorPontoRS` | 0.20 | Valor financeiro de 1 ponto do ativo, em R$ (0.20 = WIN) |
 | `pLucroRef` | 1100.0 | Lucro de referência em pontos. Quando `vResultadoDia` atinge esse valor, o trailing de proteção arma; daí em diante, o EA bloqueia se o lucro cair para 70% do pico (`vLucroAcumRef`), ou seja, uma perda de 30% do pico. |
-| `pResetarPlacarAoReiniciar` | False | **(CML)** Se `True`, reabilitar o EA no meio do dia zera o contador de perda/lucro do dia (comportamento antigo do CM). Se `False` (default), o limite de perda diária vale para o dia inteiro mesmo após reinícios. |
+| `pValorPontoRS` | 0.20 | Valor financeiro de 1 ponto do ativo, em R$ (0.20 = WIN). **Usado só na semeadura** do resultado do dia ao reativar o EA (converte `DailyResult` R$ → pontos — ver 6.3). A contagem corrente é em pontos e não usa esse valor. |
+
+> **(CML)** O resultado do dia é contabilizado internamente em pontos (6.2/6.3). O parâmetro `pResetarPlacarAoReiniciar` foi **removido**; a recuperação da perda após reinício passou a ser feita pela semeadura via `DailyResult` na entrada em tempo real.
 
 ### 8.9 Faixa de consolidação
 
@@ -630,7 +645,6 @@ O BoldGlad-CML foi criado a partir do BoldGlad-CRTF e diverge nas seguintes deci
 - **Rearme contínuo** do gatilho enquanto o viés se mantiver.
 - Detecção de cruzamento por velas fechadas (vela 1 vs vela 2), preço de referência = ponto médio das médias.
 - Stop fixo, alvo fixo, breakeven gradual, trailing por vela anterior.
-- Reset do lock diário ao reiniciar o EA no meio do dia (baseline em `DailyResult`).
 - Reemissão das ordens de stop/alvo a cada tick.
 - Defesa por data de cruzamentos e faixas (cruzamentos do dia atual processados no histórico permanecem válidos).
 
@@ -782,7 +796,7 @@ bTimeframeOK := (BarDurationF() = pTimeframe);
 
 **Item 5 do requisito (priorização):** opção (A) escolhida — uma vez que o trailing arma, a meta diária deixa de bloquear. Como consequência, `vLucroAcumRef` pode ultrapassar `pMetaDiariaPts` naturalmente (lucro continua subindo passado o teto antigo).
 
-**Logs novos:** `BG-CML: Lucro de referencia atingido ...` (uma vez por dia ao armar), `BG-CML: Lock diario - lucro caiu para 70% do pico (perda de 30%) ...`, `BG-CML: Lock diario - loss maximo diario atingido ...`, `BG-CML: Lock diario - meta diaria atingida ...`.
+**Logs novos:** `BG-CML: Lucro de referencia atingido ...` (uma vez por dia ao armar) e os três logs de parada do dia, todos com o prefixo `BG-CML: EA PAROU DE OPERAR - ...` (perda máxima, recuo de 30% do pico, meta de lucro). _(Os textos foram padronizados depois — ver changelog 10.18.)_
 
 ### 10.12 Fallback a mercado quando preço já passou do gatilho
 
@@ -810,13 +824,9 @@ Antes de enviar a ordem stop, o EA verifica:
 - `BG-CML-DIAG: BuyAtMarket enviado (Close=X >= gatilho=Y) - rompimento intra-vela | Qtd=N | Hora ...`
 - `BG-CML-DIAG: SellShortAtMarket enviado (Close=X <= gatilho=Y) - rompimento intra-vela | Qtd=N | Hora ...`
 
-### 10.13 Correção: lock diário em pontos
+### 10.13 Lock diário em pontos via DailyResult (SUPERADO pela 10.16)
 
-`DailyResult(True)` retorna R$, mas os parâmetros de meta/loss são em pontos. Correção via `pValorPontoRS` (default 0.20 = WIN) e conversão:
-
-```pascal
-vResultadoDia := (DailyResult(True) - vBaselineResultado) / (pValorPontoRS * pQtdContratos);
-```
+Herdado do CM: `DailyResult(True)` retorna R$, e a conversão para pontos era `(DailyResult(True) − vBaselineResultado) / (pValorPontoRS × pQtdContratos)`. **Esse método foi substituído** pela contabilidade interna na seção 10.16 (DailyResult não funcionava em replay).
 
 ### 10.14 Fork do BoldGlad-CM → BoldGlad-CML (criação do CML)
 
@@ -826,7 +836,7 @@ Criado a partir de cópia exata do BoldGlad-CM, motivado pelo pregão de 03/06/2
 
 1. **Filtro de tendência dominante** — inputs `pUsarFiltroTendencia(True)` e `pPeriodoTendencia(50.0)`; variáveis `vMediaTendencia`, `bTendenciaCompra`, `bTendenciaVenda`. Média calculada no bloco 5, plotada (Plot5) no bloco 6. No bloco 8, `bSinalCompra`/`bSinalVenda` recebem um AND final com a direção da tendência. Seção 2.1.3.
 2. **Menos entradas** — defaults `pInclinacaoMediaRapida` e `pTradeVela3` mudados de `True` para `False`. Novo input `pVelasPausaAposSaida(3)` e variável `bEmPausaSaida` (calculada no bloco 10); blocos 13 e 14 passam a usar `bEmPausaSaida` no lugar de `CurrentBar = nBarraSaida`. O log do bloco 13 troca o campo `BarraSaida` por `PausaSaida`. Seção 3.6.
-3. **Trava-dia à prova de reinício** — input `pResetarPlacarAoReiniciar(False)`. No bloco 4, a captura de baseline ao entrar em tempo real só ocorre se esse parâmetro for `True`; com `False`, o contador do dia reflete o `DailyResult` real do dia inteiro e a trava sobrevive a reinícios. Seção 6.3.
+3. **Trava-dia à prova de reinício** — input `pResetarPlacarAoReiniciar(False)`, baseado em `DailyResult`. _(Substituído pela contabilidade interna na 10.16 — `DailyResult` não funcionava em replay.)_ Seção 6.3.
 
 **Logs renomeados:** prefixo `BG-CM:` / `BG-CM-DIAG:` → `BG-CML:` / `BG-CML-DIAG:`.
 
@@ -845,6 +855,52 @@ Duas rotas de entrada novas, alinhadas às regras: a média de 50 (P3) é sempre
 **Decisões do trader (04/06/2026):** média de 50 prevalece sobre P1 e P2; "1ª vela do dia" = 09:00 (pregão), com `pHoraInicio = 0900`; reentrada arma no rompimento da vela que acabou de fechar; "lucro" = qualquer resultado > 0; reentrada exige viés a favor e encadeia enquanto vencer.
 
 **Não foi tocado:** faixa de consolidação (bloco 9), saídas forçadas (bloco 11), matemática de stop/alvo/breakeven/trailing (bloco 12), reset de gatilho (15), cancelamento de pendentes (16), plotagem (17) e sinalização visual (18). Todos os logs `BG-CML-DIAG:` preservados; novos logs de P1 e P2 adicionados.
+
+### 10.16 Resultado diário interno (substitui DailyResult)
+
+**Motivação:** em teste no **replay** (08/06/2026), o EA chegou a ~−R$2.040 sem o lock diário disparar. Causa: `DailyResult(True)` não acumula o resultado simulado no modo replay/backtest, então o `vResultadoDia` do script nunca chegava ao limite. (Sintoma visível: o painel mostrava `Res. Dia −R$2.040` mas `Res. Dia % −68 Pts` — números incompatíveis com a conversão do EA, denunciando que o script via outro valor.)
+
+**Mudança:** o resultado do dia passou a ser **contabilizado internamente, em pontos**:
+- Nova variável `vResultadoDiaInterno` — soma o resultado de cada trade **fechado** no dia. Bancado no bloco 10 (`vResultadoDiaInterno := vResultadoDiaInterno + vUltimoLucroAberto` na transição de saída).
+- Bloco 4: `vResultadoDia := vResultadoDiaInterno + flutuante da posição aberta` (`Close − BuyPrice` comprado / `SellPrice − Close` vendido). Não usa mais `DailyResult`.
+- Reset em bloco 1 e bloco 2 (novo dia).
+
+**Removidos:** inputs `pValorPontoRS` e `pResetarPlacarAoReiniciar`; variáveis `vBaselineResultado` e `bRTInicializado`; o bloco de captura de baseline no bloco 4. A lógica de aplicação da trava (blocos 11/13/14) e os logs `BG-CML: Lock diario ...` ficaram **intactos** — só mudou a fonte do número.
+
+**Funciona em replay e ao vivo (execução contínua).** _(A limitação de reinício foi resolvida na 10.17.)_ Ver seções 6.2 e 6.3.
+
+### 10.17 Semeadura do resultado diário ao reativar o EA (à prova de reinício)
+
+**Motivação:** com a contabilidade interna (10.16), o acumulador só conhecia os trades da execução atual — ao reativar o EA no meio do pregão, ele zerava e podia voltar a operar mesmo com o dia já no limite de perda. O trader pediu que a **perda total do dia** seja somada para decidir se o EA opera.
+
+**Mudança (bloco 4):** na primeira vez que a execução chega ao tempo real (`LastBarOnChart`), o acumulador é **semeado** com o resultado real do dia:
+
+```pascal
+if (not bRTInicializado) and (LastBarOnChart) then
+begin
+  vResultadoDiaInterno := DailyResult(True) / (pValorPontoRS * pQtdContratos);
+  bRTInicializado      := True;
+end;
+```
+
+A partir daí a soma interna segue normalmente. Se o dia já passou de `pLossMaxDiarioPts`, a checagem de loss (logo abaixo, mesmo tick) dispara e o EA **volta travado**. Em replay `DailyResult` ≈ 0, então a semeadura é inócua e a soma interna comanda — o replay continua funcionando.
+
+**Reintroduzidos:** input `pValorPontoRS` (só para a conversão da semeadura) e variável `bRTInicializado` (semeia uma única vez por execução). `pResetarPlacarAoReiniciar` **continua removido** — o reinício agora é tratado pela semeadura, sem liga/desliga.
+
+**Borda conhecida:** reativar com posição aberta herdada pode contar o flutuante dela duas vezes até fechar. Raro (EA normalmente zerado entre trades); o "Limite Perda" nativo do Profit segue como rede extra.
+
+### 10.18 Logs de parada do dia padronizados ("EA PAROU DE OPERAR")
+
+**Pedido do trader:** ao atingir a **perda máxima** ou o **lucro máximo (meta)** do dia, o EA deve parar e logar a situação claramente.
+
+**Mudança:** as três condições que travam o dia passaram a logar com o prefixo único `BG-CML: EA PAROU DE OPERAR - ...`:
+- Perda máxima diária (`pLossMaxDiarioPts`).
+- Recuo de 30% do pico do lucro (trailing de proteção).
+- Meta de lucro do dia (`pMetaDiariaPts`).
+
+Apenas **texto de log** — nenhuma lógica alterada. O EA já fechava posição, cancelava ordens e bloqueava novas entradas até o próximo pregão (blocos 11/13/14); os novos textos só tornam isso explícito no painel de Eventos.
+
+**Limitação registrada:** não há comando NTSL confiável para o script alternar o estado **Pausado/Executando** do painel do Profit. A "pausa" é funcional (o EA para de operar). Para desligar o robô de fato ao bater o limite, usar os campos nativos **"Limite Perda"** e **"Objetivo Ganho"** do controle do robô.
 
 ---
 

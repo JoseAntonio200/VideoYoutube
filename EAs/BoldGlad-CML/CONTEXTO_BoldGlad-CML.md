@@ -46,14 +46,14 @@ O BoldGlad-CML foi criado em 04/06/2026 como cópia exata do BoldGlad-CM, com **
 
 1. **Filtro de tendência dominante** (`pUsarFiltroTendencia`, `pPeriodoTendencia(50)`): só compra com preço acima da média de tendência e vende abaixo. Mata as entradas contra a tendência do dia.
 2. **Menos entradas:** `pInclinacaoMediaRapida` e `pTradeVela3` agora vêm **desligados** por padrão, e há **pausa de `pVelasPausaAposSaida` velas (default 3) após cada saída** de posição.
-3. **Trava-dia à prova de reinício** (`pResetarPlacarAoReiniciar = False`): o contador de perda do dia não zera ao reabilitar o EA no meio do pregão.
+3. **Trava-dia em pontos, contabilizada internamente, com semeadura à prova de reinício:** o resultado do dia (meta, perda máxima, trailing) é somado pelo próprio robô (trades fechados + flutuante), funcionando em replay e ao vivo. Ao reativar o EA no meio do pregão, o acumulador é **semeado** com o resultado real do dia (`DailyResult`) para considerar a perda já ocorrida — se o dia já passou do limite, volta travado. _(Substituiu o `pResetarPlacarAoReiniciar`; ver changelog 10.16 e 10.17.)_
 
 Numa **segunda rodada (04/06/2026)**, mais duas rotas de entrada (decisões do trader via perguntas guiadas — média de 50 sempre prevalece sobre ambas):
 
 4. **Entrada de abertura (P1)** (`pTradeAbertura`, default True): definida a 1ª vela do pregão (09:00), entra **a mercado** no rompimento do fundo (vendido) / topo (comprado) dela, **uma vez por dia**, só a favor da média de 50. `pHoraInicio` mudado para **0900**.
 5. **Reentrada após lucro (P2)** (`pReentradaAposLucro`, default True): ao fechar um trade no lucro (qualquer > 0), repete na **mesma direção** no rompimento da vela que fechou, **furando a pausa**, exigindo viés (M1×M2) **e** média de 50 a favor. **Encadeia enquanto vencer**; perde → volta ao normal.
 
-Para operar idêntico ao CM: `pUsarFiltroTendencia=False`, `pInclinacaoMediaRapida=True`, `pTradeVela3=True`, `pVelasPausaAposSaida=1`, `pResetarPlacarAoReiniciar=True`, `pTradeAbertura=False`, `pReentradaAposLucro=False`, `pHoraInicio=0905`.
+Para operar idêntico ao CM: `pUsarFiltroTendencia=False`, `pInclinacaoMediaRapida=True`, `pTradeVela3=True`, `pVelasPausaAposSaida=1`, `pTradeAbertura=False`, `pReentradaAposLucro=False`, `pHoraInicio=0905`. (A contabilidade interna do resultado diário não tem liga/desliga.)
 
 **Status:** aguarda primeira verificação de sintaxe no editor do Profit e validação em pregão real. Nenhuma das mudanças foi testada em produção ainda. **Commit pendente de autorização expressa do trader.**
 
@@ -84,7 +84,7 @@ O EA opera da seguinte forma:
   - Stop fixo e alvo fixo, emitidos a cada tick com qty = `Abs(PositionQty)` (defensivo contra ajuste manual da posição).
   - Breakeven gradual em steps.
   - Trailing stop por mínima/máxima da vela anterior, acionado a partir de `pDistAcionaTrailing` (default 150 pts).
-- **Controles** de horário, meta diária, perda máxima diária (em pontos, com conversão de R$ via `pValorPontoRS`, **à prova de reinício no CML** via `pResetarPlacarAoReiniciar = False`) e **trailing de proteção do lucro acumulado** (`pLucroRef` / `vLucroAcumRef`, default 1100 pts — arma após atingir esse valor; bloqueia se cair para 70% do pico, ou seja perda de 30%).
+- **Controles** de horário, meta diária, perda máxima diária e **trailing de proteção do lucro acumulado** (`pLucroRef` / `vLucroAcumRef`, default 1100 pts — arma após atingir esse valor; bloqueia se cair para 70% do pico, ou seja perda de 30%). Tudo em **pontos**, contabilizado internamente (soma dos trades fechados + flutuante) — funciona em replay e ao vivo; `DailyResult` é usado só para semear o resultado do dia ao reativar o EA (reinício).
 - **Logs de diagnóstico** (`BG-CML-DIAG:`) nos blocos 13 (armar gatilho) e 14 (envio de ordens) para tornar visível o comportamento a cada nova vela.
 
 > **Nota:** havia uma feature de **redução parcial de contratos** (fechar metade da posição a mercado ao bater +150 pts) que foi REMOVIDA em 15/05/2026 — o engine do Profit não aceitava de forma confiável a ordem parcial enquanto a OCO de cobertura estava ativa. Detalhes na seção "Redução parcial — feature removida" abaixo.
@@ -100,7 +100,7 @@ CML recém-criado (04/06/2026). Pendências de validação:
 1. **Verificar sintaxe** no editor de estratégias do Profit (clicar "Verificar Sintaxe"). Mudanças não triviais foram feitas — round-trip necessário.
 2. **Filtro de tendência:** confirmar em pregão real que, num dia de tendência clara, o EA só opera a favor (compras em dia de alta, vendas em dia de baixa) e que a linha da média de tendência (Plot5) está coerente. Avaliar se `pPeriodoTendencia = 50` é o melhor período ou se um valor maior/menor filtra melhor.
 3. **Pausa após saída:** observar se `pVelasPausaAposSaida = 3` reduz o overtrading sem perder boas reentradas. Ajustar.
-4. **Trava-dia à prova de reinício:** reabilitar o EA depois de um prejuízo no dia e confirmar que ele volta já travado (não opera).
+4. **Trava-dia interna:** no replay, confirmar que a trava de perda agora dispara (`BG-CML: EA PAROU DE OPERAR - perda maxima do dia atingida`) ao somar os trades fechados até o limite. Ao vivo, testar o reinício: desabilitar o EA com o dia no prejuízo e reabilitar — ele deve voltar **já travado** (a semeadura via `DailyResult` recupera a perda do dia). Manter o "Limite Perda" nativo do Profit como rede extra.
 5. **Entrada de abertura (P1):** confirmar que o EA grava o topo/fundo da 1ª vela (09:00) — log `Range da 1a vela do dia capturado` — e entra a mercado no rompimento, só a favor da média de 50. Validar que dispara no máximo uma vez por dia.
 6. **Reentrada após lucro (P2):** após um trade vencedor, confirmar pelos logs `Trade VENCEDOR ...` e `REENTRADA ... armada` que ele rearma na mesma direção sem esperar a pausa, e que encadeia em sequência de vitórias / para na primeira perda. Validar especialmente a detecção de lucro na saída (aproximação por `vUltimoLucroAberto`).
 
