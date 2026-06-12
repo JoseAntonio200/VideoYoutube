@@ -502,6 +502,15 @@ Todos prefixados com `BG-CML:` (operacionais) ou `BG-CML-DIAG:` (diagnóstico �
 - `BG-CML: Posicao comprada detectada - Entrada X - Stop Y - Alvo Z`
 - `BG-CML: Posicao vendida detectada - Entrada X - Stop Y - Alvo Z`
 
+**Diagnóstico do trailing stop (bloco 12 — uma linha por nova vela enquanto o trailing estiver armado):**
+
+- `BG-CML-DIAG: Trailing COMPRA subiu stop @ X (Lo1=Y - offset=Z) | Hora ...`
+- `BG-CML-DIAG: Trailing COMPRA manteve stop @ X (candidato Lo1-offset=W nao supera o stop atual) | Hora ...`
+- `BG-CML-DIAG: Trailing VENDA desceu stop @ X (Hi1=Y + offset=Z) | Hora ...`
+- `BG-CML-DIAG: Trailing VENDA manteve stop @ X (candidato Hi1+offset=W nao supera o stop atual) | Hora ...`
+
+> Tornam visível, candle a candle, onde o stop do trailing está e por que ele moveu ou ficou parado. Útil para enxergar o **atraso de um candle** (o stop só passa a valer a mínima/máxima de uma vela na vela seguinte). Só aparecem **depois** que o trailing arma (lucro ≥ `pDistAcionaTrailing`).
+
 **Diagnóstico do bloco 8 (inclinação forte da M1 — uma linha por nova vela quando ativo):**
 
 - `BG-CML-DIAG: Inclinacao M1 ALTA forte (X pts, limite Y pts) - antecipa vies COMPRA`
@@ -901,6 +910,17 @@ A partir daí a soma interna segue normalmente. Se o dia já passou de `pLossMax
 Apenas **texto de log** — nenhuma lógica alterada. O EA já fechava posição, cancelava ordens e bloqueava novas entradas até o próximo pregão (blocos 11/13/14); os novos textos só tornam isso explícito no painel de Eventos.
 
 **Limitação registrada:** não há comando NTSL confiável para o script alternar o estado **Pausado/Executando** do painel do Profit. A "pausa" é funcional (o EA para de operar). Para desligar o robô de fato ao bater o limite, usar os campos nativos **"Limite Perda"** e **"Objetivo Ganho"** do controle do robô.
+
+### 10.19 Log de diagnóstico do trailing stop
+
+**Motivação:** numa operação (10/06/2026) o trailing saiu mais abaixo do que o esperado e não havia como ver, pelo painel, onde o stop do trailing estava em cada candle. O trailing segue a **mínima/máxima da vela anterior** e só atualiza na **abertura de uma nova vela** — então tem um **atraso de um candle**, e isso não era observável.
+
+**Mudança (bloco 12, somente logs):** a cada nova vela com o trailing armado, o EA passa a logar onde o stop ficou e se subiu/desceu ou ficou parado:
+- `BG-CML-DIAG: Trailing COMPRA subiu stop @ X (Lo1=Y - offset=Z) | Hora ...`
+- `BG-CML-DIAG: Trailing COMPRA manteve stop @ X (candidato Lo1-offset=W nao supera o stop atual) | Hora ...`
+- Espelhados para venda (`desceu`/`manteve`, com `Hi1+offset`).
+
+A lógica do trailing (condição e atualização de `vStopAtual`) ficou **idêntica** — só foram acrescentados os `ConsoleLog`. Nenhum outro bloco tocado; todos os DIAG existentes preservados.
 
 ---
 

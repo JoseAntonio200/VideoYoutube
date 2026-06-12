@@ -887,8 +887,24 @@ begin
 
       if (bTrailingAcionado) and (bNovaBarra) then
       begin
+        { (CML-DIAG) Log do trailing a cada nova vela: mostra a mínima da }
+        { vela anterior (Lo1, referencia), o nivel candidato (Lo1-offset) }
+        { e se o stop subiu ou ficou parado. ATENCAO ao atraso de 1       }
+        { candle: o stop so passa a valer "Lo1 - offset" NA nova vela,    }
+        { usando a mínima da vela que ACABOU de fechar.                   }
         if ((vLow1 - pOffsetEntrada) > vStopAtual) then
+        begin
           vStopAtual := vLow1 - pOffsetEntrada;
+          ConsoleLog("BG-CML-DIAG: Trailing COMPRA subiu stop @ " + Round(vStopAtual)
+                     + " (Lo1=" + Round(vLow1) + " - offset=" + Round(pOffsetEntrada) + ")"
+                     + " | Hora " + nHoraAtual);
+        end
+        else
+        begin
+          ConsoleLog("BG-CML-DIAG: Trailing COMPRA manteve stop @ " + Round(vStopAtual)
+                     + " (candidato Lo1-offset=" + Round(vLow1 - pOffsetEntrada) + " nao supera o stop atual)"
+                     + " | Hora " + nHoraAtual);
+        end;
       end;
     end;
 
@@ -948,8 +964,22 @@ begin
 
       if (bTrailingAcionado) and (bNovaBarra) then
       begin
+        { (CML-DIAG) Espelho do log de compra. Aqui o stop desce seguindo }
+        { a maxima da vela anterior (Hi1) + offset; mesmo atraso de 1      }
+        { candle.                                                         }
         if ((vHigh1 + pOffsetEntrada) < vStopAtual) then
+        begin
           vStopAtual := vHigh1 + pOffsetEntrada;
+          ConsoleLog("BG-CML-DIAG: Trailing VENDA desceu stop @ " + Round(vStopAtual)
+                     + " (Hi1=" + Round(vHigh1) + " + offset=" + Round(pOffsetEntrada) + ")"
+                     + " | Hora " + nHoraAtual);
+        end
+        else
+        begin
+          ConsoleLog("BG-CML-DIAG: Trailing VENDA manteve stop @ " + Round(vStopAtual)
+                     + " (candidato Hi1+offset=" + Round(vHigh1 + pOffsetEntrada) + " nao supera o stop atual)"
+                     + " | Hora " + nHoraAtual);
+        end;
       end;
     end;
 
