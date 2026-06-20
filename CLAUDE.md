@@ -17,11 +17,13 @@ There is no compiler, package manager, or test runner — NTSL source (`.txt`) i
 - `docs/Setups.docx`, `docs/Material Complementar*.pdf` — strategy reference material (Larry Williams / Stormer setups, etc.).
 - `dados/*.csv` — exported trade logs from Profit (Brazilian CSV: `;` separator, Latin-1/Windows-1252 encoding, comma decimal, dates in `DD/MM/YYYY`).
 
-Four EAs currently live here:
+Six EAs currently live here:
 
 - **BoldGlad-CRTF** — moving-average crossover (arithmetic M1/M2) with breakout confirmation, consolidation-range detection, breakeven steps and trailing stop. The active development target.
 - **BoldGlad-CM** — variant of BoldGlad-CRTF. Starts as a copy; specific changes to be indicated by the user.
-- **BoldGlad-CML** — variant of BoldGlad-CM aimed at trending days: adds a dominant-trend filter (slow MA gating bias direction), reduced entries (anticipation triggers off by default + post-exit cooldown), and a restart-proof daily loss lock. Log tag `BG-CML:`.
+- **BoldGlad-CML** — variant of BoldGlad-CM aimed at trending days: adds a dominant-trend filter (slow MA gating bias direction), reduced entries (anticipation triggers off by default + post-exit cooldown), and a restart-proof daily loss lock (internal points accounting + DailyResult seeding). Also has opening-candle market entry (P1) and re-entry-after-win (P2). Log tag `BG-CML:`.
+- **BoldGlad-CML1** — variant of BoldGlad-CML with the trend filter removed and the entry-reduction removed (no N-candle pause — only the same-candle reentry block remains — and anticipation triggers back on by default). Everything else (P1, P2, faixa, internal daily accounting, trailing) is inherited unchanged. Also has a HiLo stop mode (`pStopHiLo`/`pPeriodoHilo`) that trails the lowest-low/highest-high of the last N candles per bar. Log tag `BG-CML1:`.
+- **BoldGlad-M** — forked from BoldGlad-CML1 (12/06/2026), now a **tick-by-tick single-EMA system** (reworked 18/06/2026). Bidirectional, evaluated every tick (does not wait for candle close). Three MAs: M1=100 / M2=200 feed **only the consolidation range**; **M3 = EMA(21)** is the trade signal. **Entry is a candle-breakout stop order:** long requires the previous candle to be **positive** (`Close[1]>Open[1]`), M3 slope `M3[1]−M3[2]` **> `pInclinacao`(15)**, and the breakout level **above M3** → `BuyStop` at `High[1] + pDeslocamento(10)`; short is the mirror (negative candle, slope < −15, `SellShortStop` at `Low[1] − pDeslocamento`). Only one side arms at a time (the prior candle is positive XOR negative), tracked by `nLadoArmado`. Exits (any tick, unchanged): price crossing M3 against the position, stop gain (`pStopGainPts`, 1000), stop loss (`pStopLossPts`, 1000), time and daily lock. Re-entry only on the candle after an exit (`nBarraSaida` guard). After an **M3-cross exit specifically** (`bExitM3Pendente`→`bFiltroDistReentrada`, latched in block 11/read in 10), the breakout level is pushed to ≥ `pDistMinReentrada`(100) from M3 (`max(High[1]+desloc, M3+100)`); this floor does not apply after stop gain/loss/time/lock. (Superseded earlier same-day attempts: market entry by M3-cross, a frozen-M3 distance ref, and an M3±100 stop bracket — all changed per the trader.) Daily giveback lock is configurable via `pPercDevolucao` (default 20% of the day's peak, arms after `pLucroRef`) — replaced the old hardcoded 30%. Consolidation on by default (`pConsolicao=True`). Keeps the internal daily accounting. Log tag `BG-M:`. (Earlier same-day attempts — a two-MA close-based trend system and an EMA9/21 breakout-re-entry rework — were both superseded; the breakout one only traded once per day in a sideways tape.)
 - **Larry9.2** — Setup 9.2 (Larry Williams / Stormer): EMA 9×21 trend filter + correction-candle pullback entry with configurable risk/reward multiplier.
 
 ## NTSL conventions used in this codebase
@@ -31,8 +33,12 @@ These are followed consistently across the EAs — keep them when editing:
 - **Parameter names** start with lowercase `p`: `pPeriodoM1`, `pOffsetEntrada`, `pStopFixoPts`.
 - **Variable names** are prefixed by type: `v` for Float, `b` for Boolean, `n` for Integer (e.g. `vM1`, `bCruzDetectado`, `nTendencia`).
 - **Comments** are in Portuguese, wrapped in `{ }`.
-- **Console logs** are prefixed with the EA's tag (`BG-CRTF:` for BoldGlad-CRTF, `BG-CM:` for BoldGlad-CM, `BG-CML:` for BoldGlad-CML) so they can be filtered in Profit's event window. Text must be ASCII-safe (no accents) — Profit's console renders them poorly.
+- **Console logs** are prefixed with the EA's tag (`BG-CRTF:` for BoldGlad-CRTF, `BG-CM:` for BoldGlad-CM, `BG-CML:` for BoldGlad-CML, `BG-CML1:` for BoldGlad-CML1, `BG-M:` for BoldGlad-M) so they can be filtered in Profit's event window. Text must be ASCII-safe (no accents) — Profit's console renders them poorly.
 - Code is structured into **numbered sections** (`{ 1. RESET }`, `{ 2. DETECCAO DE NOVA BARRA }`, …) — preserve the numbering when adding logic.
+- **Header comment block.** Every EA `.txt` starts with a `{ }` comment block (ASCII-safe, Portuguese) that **summarizes** the EA: its **name** and the **main operational behavior — above all the entry and exit conditions of trades** — in a few lines. Keep it concise; the exhaustive description lives in the `*_documentacao.md`.
+- **Input ordering.** `input` parameters are grouped by function with `{ --- <grupo> --- }` section comments and ordered to follow the trade flow: bias/signal generation → entry triggers/routes (offset, opening, re-entry) → stop/target & position management (stop, target, breakeven, trailing) → quantity → time window → daily risk/lock → auxiliary filters (consolidation range, etc.).
+
+  These two apply to EAs **created or restructured from here on** — existing EAs may still have verbose headers or a different input order; don't retrofit them without the user asking.
 
 ## NTSL gotcha — `FloatToString` in `ConsoleLog`
 
